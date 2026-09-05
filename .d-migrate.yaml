@@ -1,0 +1,40 @@
+# Verbindungs-Referenzen fuer den MCP-Server (LF-012/LN-038: secret-frei,
+# die eigentliche URL steht nicht hier, sondern in der Env-Var, auf die
+# credentialRef zeigt -- siehe .env: D_MIGRATE_LOCAL_PG_URL).
+#
+# "postgres" ist der Service aus docker-compose.yml; der d-migrate-mcp-
+# Container laeuft im Host-Netz (network_mode: host), erreicht ihn also ueber
+# den auf dem Host published Port (127.0.0.1:${PG_PORT}), nicht per
+# Service-DNS-Namen.
+#
+# Verbindungen werden ohne "--tenant"-Flag (existiert fuer "mcp serve" nicht)
+# immer unter Tenant "default" registriert -- policy-rules.yaml muss
+# denselben Tenant tragen.
+database:
+  connections:
+    local_pg:
+      displayName: "Lokales Test-Postgres"
+      dialectId: postgresql
+      sensitivity: NON_PRODUCTION
+      credentialRef: "env:D_MIGRATE_LOCAL_PG_URL"
+
+# JDBC-backed server-state (job/quota/idempotency + schema/artifact-Stores)
+# fuer "mcp serve" -- wird ueber denselben Pfad wie --connection-config
+# geladen (McpServeWiring.resolveServerStateConfigOrExit), kein eigenes
+# CLI-Flag noetig. Nutzt dieselbe Postgres-Instanz wie "local_pg" oben, aber
+# ein eigenes Schema "dmigrate_state" statt "public" via "?currentSchema="
+# -- Flyway (baselineOnMigrate=false) verweigert sonst die Migration gegen
+# "public". "dmigrate_state" existiert nicht vorab; Flyway legt es dank
+# createSchemas-Default selbst an. Host/Port literal (127.0.0.1:5433, kein
+# ${PG_PORT} -- bei Aenderung in .env hier manuell nachziehen), weil
+# d-migrate-mcp per network_mode: host laeuft und den Service-DNS-Namen
+# "postgres" nicht aufloesen kann. User/Passwort kommen als ${VAR}-Referenz
+# aus der Prozessumgebung (docker-compose env_file: .env) -- die jdbcUrl
+# selbst enthaelt keine Secrets, kann also literal stehen bleiben.
+server:
+  state:
+    jdbcUrl: "jdbc:postgresql://127.0.0.1:5433/dmigrate?currentSchema=dmigrate_state"
+    username: "${POSTGRES_USER}"
+    password: "${POSTGRES_PASSWORD}"
+    migrations:
+      auto: true

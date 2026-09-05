@@ -1,0 +1,41 @@
+# Policy-Regeln fuer *_start-Jobs (mcp serve --policy-file). Erste passende
+# Regel gewinnt; ohne Treffer bleibt der Default Deny("policy:no-rule").
+#
+# Read-only/planende Operationen sind erlaubt; schreibende Operationen
+# verlangen weiterhin eine Freigabe (Challenge + `mcp approval-grant issue`).
+rules:
+  - tenantId: default
+    toolName: schema_reverse_start
+    effect: allow
+  - tenantId: default
+    toolName: schema_compare_start
+    effect: allow
+  - tenantId: default
+    toolName: data_profile_start
+    effect: allow
+  - tenantId: default
+    toolName: data_import_start
+    effect: challenge
+    requiredScopes: [dmigrate:data:write]
+    reasons: ["writes require approval"]
+  - tenantId: default
+    toolName: data_transfer_start
+    effect: challenge
+    requiredScopes: [dmigrate:data:write]
+    reasons: ["writes require approval"]
+  - tenantId: default
+    toolName: testdata_plan
+    effect: allow
+  - tenantId: default
+    toolName: testdata_execute
+    effect: challenge
+    requiredScopes: [dmigrate:ai:execute]
+    reasons: ["writing AI-generated test data requires approval"]
+  - tenantId: default
+    toolName: procedure_transform_plan
+    effect: allow
+  - tenantId: default
+    toolName: procedure_transform_execute
+    effect: challenge
+    requiredScopes: [dmigrate:ai:execute]
+    reasons: ["applying an AI-generated procedure transform requires approval"]

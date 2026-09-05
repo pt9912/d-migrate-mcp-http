@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:17.10-trixie
+    container_name: d-migrate-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:${PG_PORT:-5433}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  d-migrate-mcp:
+    image: ghcr.io/pt9912/d-migrate:1.2.0
+    container_name: d-migrate-mcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # host networking so the server can bind 127.0.0.1 (required for
+    # --auth-mode disabled, which is strictly loopback-only) while still
+    # being reachable from the host at 127.0.0.1:8787. Also lets it reach
+    # postgres via the host-published 127.0.0.1:${PG_PORT}. Linux-only.
+    network_mode: host
+    user: "${UID:-1000}:${GID:-1000}"
+    env_file:
+      - .env
+    command:
+      - mcp
+      - serve
+      - --transport=http
+      - --bind=127.0.0.1
+      - --port=8787
+      - --auth-mode=disabled
+      - --mcp-state-dir=/work/state
+      - --connection-config=/work/.d-migrate.yaml
+      - --policy-file=/work/policy-rules.yaml
+    volumes:
+      - ./state:/work/state
+      - ./.d-migrate.yaml:/work/.d-migrate.yaml:ro
+      - ./policy-rules.yaml:/work/policy-rules.yaml:ro
+    restart: unless-stopped
+
+volumes:
+  pg-data:
