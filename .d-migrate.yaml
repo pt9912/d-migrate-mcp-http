@@ -22,6 +22,22 @@ database:
       dialectId: mssql
       sensitivity: NON_PRODUCTION
       credentialRef: "env:D_MIGRATE_LOCAL_MSSQL_URL"
+    local_mysql:
+      displayName: "Lokales Test-MySQL"
+      dialectId: mysql
+      sensitivity: NON_PRODUCTION
+      credentialRef: "env:D_MIGRATE_LOCAL_MYSQL_URL"
+    local_sqlite:
+      # Dateibasiert, kein Compose-Service -- die .db-Datei liegt unter
+      # ./sqlite-data (nach /work/sqlite-data gemountet) und wird bei Bedarf
+      # angelegt (mode=rwc). spatialite=true laedt mod_spatialite, das im
+      # d-migrate-Runtime-Image bereits enthalten ist (kein separates Setup
+      # noetig). Kein echtes Secret, aber die MCP-Mapping-Form verlangt
+      # trotzdem credentialRef statt einer Bare-URL.
+      displayName: "Lokales Test-SQLite (SpatiaLite)"
+      dialectId: sqlite
+      sensitivity: NON_PRODUCTION
+      credentialRef: "env:D_MIGRATE_LOCAL_SQLITE_URL"
 
 # JDBC-backed server-state (job/quota/idempotency + schema/artifact-Stores)
 # fuer "mcp serve" -- wird ueber denselben Pfad wie --connection-config

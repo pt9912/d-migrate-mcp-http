@@ -55,6 +55,24 @@ services:
       - -Q
       - "IF DB_ID('dmigrate') IS NULL CREATE DATABASE dmigrate"
 
+  mysql:
+    image: mysql:8.4
+    container_name: d-migrate-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
+      MYSQL_DATABASE: dmigrate
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
   d-migrate-mcp:
     image: ghcr.io/pt9912/d-migrate:1.2.0
     container_name: d-migrate-mcp
@@ -63,11 +81,13 @@ services:
         condition: service_healthy
       mssql-init:
         condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
     # host networking so the server can bind 127.0.0.1 (required for
     # --auth-mode disabled, which is strictly loopback-only) while still
     # being reachable from the host at 127.0.0.1:8787. Also lets it reach
-    # postgres/mssql via the host-published 127.0.0.1:${PG_PORT}/${MSSQL_PORT}.
-    # Linux-only.
+    # postgres/mssql/mysql via the host-published
+    # 127.0.0.1:${PG_PORT}/${MSSQL_PORT}/${MYSQL_PORT}. Linux-only.
     network_mode: host
     user: "${UID:-1000}:${GID:-1000}"
     env_file:
@@ -84,6 +104,7 @@ services:
       - --policy-file=/work/policy-rules.yaml
     volumes:
       - ./state:/work/state
+      - ./sqlite-data:/work/sqlite-data
       - ./.d-migrate.yaml:/work/.d-migrate.yaml:ro
       - ./policy-rules.yaml:/work/policy-rules.yaml:ro
     restart: unless-stopped
@@ -91,3 +112,4 @@ services:
 volumes:
   pg-data:
   mssql-data:
+  mysql-data:

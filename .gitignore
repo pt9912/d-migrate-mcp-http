@@ -1,2 +1,4 @@
 state/
+sqlite-data/*
+!sqlite-data/.gitkeep
 .env

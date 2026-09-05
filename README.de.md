@@ -6,7 +6,8 @@
 
 Ein lokales Docker-Compose-Setup, das den
 [d-migrate](https://github.com/pt9912/d-migrate)-MCP-Server (HTTP-Transport)
-gegen echte Postgres- und SQL-Server-Testdatenbanken betreibt und
+gegen echte Postgres-, SQL-Server-, MySQL- und SQLite/SpatiaLite-Test-
+datenbanken betreibt — d-migrates vier unterstützte Dialekte — und
 project-scoped in Claude Code registriert (`.mcp.json`). Für alle, die
 d-migrates
 Schema-/Daten-Tools als MCP-Tools aus einer Claude-Code-Session heraus
@@ -20,9 +21,9 @@ Connections/State von Hand zu verdrahten.
 - Nach einmaliger Freigabe des project-scoped `.mcp.json`-Servers in
   Claude Code stehen 22 Tools zur Verfügung (`schema_validate`,
   `schema_reverse_start`, `data_profile_start`, `job_status_get`, …).
-- `schema_reverse_start` gegen beide verdrahteten Connections (`local_pg`,
-  `local_mssql`) liefert `SUCCEEDED` mit Artefakt — bei beiden per
-  Tool-Call verifiziert.
+- `schema_reverse_start` gegen jede der vier verdrahteten Connections
+  (`local_pg`, `local_mssql`, `local_mysql`, `local_sqlite`) liefert
+  `SUCCEEDED` mit Artefakt — bei allen vieren per Tool-Call verifiziert.
 - Ein laufender Job übersteht `docker compose restart d-migrate-mcp` —
   Server-State liegt in Postgres, nicht in-memory; verifiziert (Job vor
   Neustart erzeugt, `job_status_get` liefert danach denselben Status).
@@ -45,8 +46,9 @@ Nicht-Loopback-Betrieb gebraucht wird.
 ## Kerngedanke
 
 So wenig Konfiguration wie möglich, aber genug, um echte DB-Tools nutzbar
-zu machen: jede zusätzliche Datei (`.d-migrate.yaml`, `policy-rules.yaml`,
-Postgres-Service) existiert nur, weil ein konkretes Tool sie sonst nicht
+zu machen: jede zusätzliche Datei oder jeder zusätzliche Service
+(`.d-migrate.yaml`, `policy-rules.yaml`, die Postgres-/SQL-Server-/
+MySQL-Container) existiert nur, weil ein konkretes Tool sie sonst nicht
 ausführen könnte — nicht auf Vorrat.
 
 ## Was macht es vertrauenswürdig?
@@ -74,42 +76,53 @@ ausführen könnte — nicht auf Vorrat.
    kann) ist **Linux-only** — funktioniert so nicht unter macOS/Windows
    Docker Desktop.
 2. Ports müssen frei sein: `8787` (MCP), `5433` (Postgres, siehe
-   `PG_PORT`) und `1433` (SQL Server, siehe `MSSQL_PORT`) in `.env` — bei
-   Kollision anpassen.
-3. `cp .env.example .env` und echte Passwörter setzen — `POSTGRES_PASSWORD`
-   und `MSSQL_SA_PASSWORD` müssen jeweils synchron zum Passwort in
-   `D_MIGRATE_LOCAL_PG_URL` / `D_MIGRATE_LOCAL_MSSQL_URL` bleiben (gleiche
+   `PG_PORT`), `1433` (SQL Server, siehe `MSSQL_PORT`) und `3306` (MySQL,
+   siehe `MYSQL_PORT`) in `.env` — bei Kollision anpassen. SQLite hat
+   keinen Port, es ist eine Datei unter `./sqlite-data`.
+3. `cp .env.example .env` und echte Passwörter setzen — `POSTGRES_PASSWORD`,
+   `MSSQL_SA_PASSWORD` und `MYSQL_ROOT_PASSWORD` müssen jeweils synchron
+   zum Passwort in der passenden `D_MIGRATE_LOCAL_*_URL` bleiben (gleiche
    Datei, je zwei Stellen, keine Variablen-Interpolation dazwischen).
    `MSSQL_SA_PASSWORD` muss die SQL-Server-Komplexitätsregel erfüllen
-   (mind. 8 Zeichen, 3 von 4 Kategorien) und URL-reservierte Zeichen
-   (`@ : / ? # %`) vermeiden, damit es in der URL nicht percent-encoded
-   werden muss. `.env` ist gitignored, wird nie committet.
+   (mind. 8 Zeichen, 3 von 4 Kategorien); alle drei DB-Passwörter sollten
+   URL-reservierte Zeichen (`@ : / ? # %`) vermeiden, damit sie in der URL
+   nicht percent-encoded werden müssen. `.env` ist gitignored, wird nie
+   committet.
 4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.2.0`,
-   `postgres:17.10-trixie` und `mcr.microsoft.com/mssql/server:2022-latest`,
-   startet Postgres und SQL Server, wartet auf „healthy“ bei beiden, führt
+   `postgres:17.10-trixie`, `mcr.microsoft.com/mssql/server:2022-latest`
+   und `mysql:8.4`, startet alle drei, wartet auf „healthy“, führt
    einmalig `mssql-init` aus (legt die Datenbank `dmigrate` an — SQL
-   Servers Default-Datenbank `master` wird bewusst nicht als Ziel genutzt),
-   dann den MCP-Server (registriert `local_pg` und `local_mssql`, migriert
-   das `dmigrate_state`-Schema).
+   Servers Default-Datenbank `master` wird bewusst nicht als Ziel genutzt;
+   MySQL legt seine `dmigrate`-Datenbank selbst per `MYSQL_DATABASE` an),
+   dann den MCP-Server (registriert `local_pg`, `local_mssql`,
+   `local_mysql`, `local_sqlite`, migriert das `dmigrate_state`-Schema).
 5. Projekt in Claude Code öffnen. `.mcp.json` ist eingecheckt, aber
    **standardmäßig nicht vertraut** — Claude Code zeigt `d-migrate` als
    „⏸ Pending approval“, bis einmal bestätigt wird (`claude mcp list` /
    `/mcp`-Prompt). Neue Tools erscheinen erst in einer danach frisch
    gestarteten Session.
-6. `./state` (dateibasierte MCP-Artefakte) und das `pg-data`-Docker-Volume
-   entstehen beim ersten Start, sind gitignored und lokal — ein frischer
-   Clone startet mit leerem State.
+6. `./state` (dateibasierte MCP-Artefakte), `./sqlite-data` (die
+   SQLite-Datei, wird bei Bedarf angelegt) und die Docker-Volumes
+   (`pg-data`, `mssql-data`, `mysql-data`) entstehen beim ersten Start,
+   sind gitignored und lokal — ein frischer Clone startet mit leerem
+   State.
 
 ## How it's wired
 
 - **Auth**: `--auth-mode disabled`, strikt Loopback-only (`127.0.0.1`).
 - **MCP-State-Dir**: `./state`, in den Container gemountet, Host-User-Owned
   (`.env` setzt `UID`/`GID`) — dateibasierte Upload-Segmente/Artefakte.
-- **DB-Connections**: lokales Postgres (`postgres:17.10-trixie`,
-  `127.0.0.1:${PG_PORT:-5433}`) als `local_pg`, und lokaler SQL Server
+- **DB-Connections** (alle `.d-migrate.yaml`, Tenant `default`): lokales
+  Postgres (`postgres:17.10-trixie`, `127.0.0.1:${PG_PORT:-5433}`) als
+  `local_pg`; lokaler SQL Server
   (`mcr.microsoft.com/mssql/server:2022-latest`,
-  `127.0.0.1:${MSSQL_PORT:-1433}`, Datenbank `dmigrate`) als `local_mssql`
-  (`.d-migrate.yaml`, Tenant `default`).
+  `127.0.0.1:${MSSQL_PORT:-1433}`, Datenbank `dmigrate`) als
+  `local_mssql`; lokales MySQL (`mysql:8.4`,
+  `127.0.0.1:${MYSQL_PORT:-3306}`, Datenbank `dmigrate`) als
+  `local_mysql`; eine SQLite-Datei unter `./sqlite-data/local.db` (wird
+  bei Bedarf angelegt, `?spatialite=true` lädt das im
+  d-migrate-Runtime-Image bereits enthaltene `mod_spatialite`) als
+  `local_sqlite`.
 - **Server-State**: Jobs/Quotas/Idempotency/Schema-Stores JDBC-backed im
   selben Postgres, Schema `dmigrate_state` (`server.state` in
   `.d-migrate.yaml`, `migrations.auto: true`).
