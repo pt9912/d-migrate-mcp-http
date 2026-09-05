@@ -1,108 +1,111 @@
 # d-migrate MCP (HTTP)
 
-## Was ist d-migrate MCP (HTTP)?
+**English** | [Deutsch](README.de.md)
 
-Ein lokales Docker-Compose-Setup, das den
-[d-migrate](https://github.com/pt9912/d-migrate)-MCP-Server (HTTP-Transport)
-gegen eine echte Postgres-Testdatenbank betreibt und project-scoped in
-Claude Code registriert (`.mcp.json`). Für alle, die d-migrates
-Schema-/Daten-Tools als MCP-Tools aus einer Claude-Code-Session heraus
-aufrufen wollen, ohne d-migrate manuell zu bauen, zu installieren oder
-Connections/State von Hand zu verdrahten.
+## What is d-migrate MCP (HTTP)?
 
-## Was kann ich heute tun?
+A local Docker Compose setup that runs the
+[d-migrate](https://github.com/pt9912/d-migrate) MCP server (HTTP
+transport) against a real Postgres test database and registers it
+project-scoped in Claude Code (`.mcp.json`). For anyone who wants to call
+d-migrate's schema/data tools as MCP tools from a Claude Code session
+without building/installing d-migrate by hand or wiring up connections and
+state manually.
 
-- `make up` startet Postgres und den MCP-Server; danach läuft er unter
+## What can I do today?
+
+- `make up` starts Postgres and the MCP server; it's then reachable at
   `http://127.0.0.1:8787/mcp`.
-- Nach einmaliger Freigabe des project-scoped `.mcp.json`-Servers in
-  Claude Code stehen 22 Tools zur Verfügung (`schema_validate`,
-  `schema_reverse_start`, `data_profile_start`, `job_status_get`, …).
-- `schema_reverse_start` gegen die verdrahtete Connection `local_pg`
-  liefert `SUCCEEDED` mit Artefakt — verifiziert per Tool-Call.
-- Ein laufender Job übersteht `docker compose restart d-migrate-mcp` —
-  Server-State liegt in Postgres, nicht in-memory; verifiziert (Job vor
-  Neustart erzeugt, `job_status_get` liefert danach denselben Status).
-- `policy-rules.yaml` lässt read-only/planende `*_start`-Tools durch;
-  schreibende Tools bleiben ohne Freigabe blockiert (`policy:no-rule`
-  ohne Regel, `challenge` mit Regel) — beides mit echten Tool-Calls
-  gegengeprüft.
+- Once you approve the project-scoped `.mcp.json` server in Claude Code,
+  22 tools are available (`schema_validate`, `schema_reverse_start`,
+  `data_profile_start`, `job_status_get`, …).
+- `schema_reverse_start` against the wired-up `local_pg` connection
+  returns `SUCCEEDED` with an artifact — verified via a live tool call.
+- A running job survives `docker compose restart d-migrate-mcp` —
+  server-state lives in Postgres, not in-memory; verified (job created
+  before a restart, `job_status_get` returns the same status afterwards).
+- `policy-rules.yaml` lets read-only/planning `*_start` tools through;
+  write tools stay blocked without an approval (`policy:no-rule` with no
+  rule, `challenge` with one) — both checked against live tool calls.
 
-## Warum d-migrate MCP (HTTP)?
+## Why d-migrate MCP (HTTP)?
 
-Der MCP-Server allein (ohne Connection-Config, Policy-File, Server-State)
-lässt sich zwar in Sekunden starten, kann dann aber nur gegen
-Schema-Dateien arbeiten — jedes Tool, das eine echte Datenbank anfasst,
-läuft ins Leere (keine registrierte Connection) oder wird von der
-Fail-closed-Policy abgelehnt. Die Alternative wäre, das bei jedem Bedarf
-von Hand zu verdrahten. Dieses Repo bündelt das minimal Nötige einmal,
-lokal und ohne die volle Auth-Infrastruktur (`jwt-jwks`), die nur für
-Nicht-Loopback-Betrieb gebraucht wird.
+The MCP server on its own (no connection config, no policy file, no
+server-state) starts in seconds, but can then only work against schema
+files — any tool that touches a real database either has nothing to
+resolve (no registered connection) or gets rejected by the fail-closed
+policy. The alternative would be wiring that up by hand every time. This
+repo bundles the minimum needed once, locally, without the full auth
+infrastructure (`jwt-jwks`) that's only needed for non-loopback operation.
 
-## Kerngedanke
+## Core idea
 
-So wenig Konfiguration wie möglich, aber genug, um echte DB-Tools nutzbar
-zu machen: jede zusätzliche Datei (`.d-migrate.yaml`, `policy-rules.yaml`,
-Postgres-Service) existiert nur, weil ein konkretes Tool sie sonst nicht
-ausführen könnte — nicht auf Vorrat.
+As little configuration as possible, but enough to make real DB tools
+usable: every extra file (`.d-migrate.yaml`, `policy-rules.yaml`, the
+Postgres service) exists only because some concrete tool would otherwise
+fail to run — not speculatively.
 
-## Was macht es vertrauenswürdig?
+## What makes it trustworthy?
 
-- **Auth-Grenze:** `--auth-mode disabled` ist serverseitig strikt auf
-  Loopback beschränkt (Boot-Validierung lehnt Nicht-Loopback-Bind ab,
-  kein stiller Fallback) — [Administrationshandbuch §9.1](https://github.com/pt9912/d-migrate/blob/main/docs/user/administrationshandbuch.md#9-sicherheit).
-- **Policy:** ohne passende Regel in `policy-rules.yaml` ist jeder
-  `*_start`-Job standardmäßig `Deny` (`policy:no-rule`), fail-closed —
+- **Auth boundary:** `--auth-mode disabled` is strictly loopback-only on
+  the server side (boot validation rejects a non-loopback bind, no silent
+  fallback) — [Administrationshandbuch §9.1](https://github.com/pt9912/d-migrate/blob/main/docs/user/administrationshandbuch.md#9-sicherheit).
+- **Policy:** without a matching rule in `policy-rules.yaml`, every
+  `*_start` job is `Deny` by default (`policy:no-rule`), fail-closed —
   [Administrationshandbuch §6.7](https://github.com/pt9912/d-migrate/blob/main/docs/user/administrationshandbuch.md#67-policy-gesteuerte-datenoperationen).
-- **Persistenz:** Server-State liegt im Postgres-Schema `dmigrate_state`
-  (Flyway-migriert), nicht in-memory — durch Job-Überleben nach
-  Container-Neustart verifiziert, nicht nur behauptet.
-- **Kanonische Quellen:** [Anwenderhandbuch](https://github.com/pt9912/d-migrate/blob/main/docs/user/anwenderhandbuch.md),
+- **Persistence:** server-state lives in the Postgres schema
+  `dmigrate_state` (Flyway-migrated), not in-memory — verified by a job
+  surviving a container restart, not just claimed.
+- **Canonical sources:** [Anwenderhandbuch](https://github.com/pt9912/d-migrate/blob/main/docs/user/anwenderhandbuch.md),
   [Administrationshandbuch](https://github.com/pt9912/d-migrate/blob/main/docs/user/administrationshandbuch.md),
   [MCP server spec](https://github.com/pt9912/d-migrate/blob/main/spec/mcp-server.md)
-  im d-migrate-Repo — dieses README verweist darauf, dupliziert sie nicht.
+  in the d-migrate repo — this README points to them, it doesn't
+  duplicate them.
 
 ---
 
-## Setup (nach dem Klonen)
+## Setup (after cloning)
 
-1. **Docker + Docker Compose v2** nötig. `network_mode: host` (damit der
-   Container auf Loopback binden und trotzdem vom Host erreichbar sein
-   kann) ist **Linux-only** — funktioniert so nicht unter macOS/Windows
-   Docker Desktop.
-2. Ports müssen frei sein: `8787` (MCP) und `5433` (Postgres, siehe
-   `PG_PORT` in `.env` — bei Kollision anpassen).
-3. `cp .env.example .env` und ein echtes `POSTGRES_PASSWORD` setzen — muss
-   synchron zum Passwort in `D_MIGRATE_LOCAL_PG_URL` bleiben (gleiche
-   Datei, zwei Stellen, keine Variablen-Interpolation dazwischen). `.env`
-   ist gitignored, wird nie committet.
-4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.2.0` und
-   `postgres:17.10-trixie`, startet Postgres, wartet auf „healthy“, dann
-   den MCP-Server (registriert `local_pg`, migriert das
-   `dmigrate_state`-Schema).
-5. Projekt in Claude Code öffnen. `.mcp.json` ist eingecheckt, aber
-   **standardmäßig nicht vertraut** — Claude Code zeigt `d-migrate` als
-   „⏸ Pending approval“, bis einmal bestätigt wird (`claude mcp list` /
-   `/mcp`-Prompt). Neue Tools erscheinen erst in einer danach frisch
-   gestarteten Session.
-6. `./state` (dateibasierte MCP-Artefakte) und das `pg-data`-Docker-Volume
-   entstehen beim ersten Start, sind gitignored und lokal — ein frischer
-   Clone startet mit leerem State.
+1. **Docker + Docker Compose v2** required. `network_mode: host` (used so
+   the container can bind loopback yet stay reachable from the host) is
+   **Linux-only** — this setup does not work as-is on macOS/Windows Docker
+   Desktop.
+2. Ports must be free on the host: `8787` (MCP) and `5433` (Postgres, see
+   `PG_PORT` in `.env` — pick another if it collides with something else
+   you have running).
+3. `cp .env.example .env` and set a real `POSTGRES_PASSWORD` — keep it in
+   sync with the password embedded in `D_MIGRATE_LOCAL_PG_URL` (same file,
+   two places; there's no variable substitution across them). `.env` is
+   gitignored, never committed.
+4. `make up` — pulls `ghcr.io/pt9912/d-migrate:1.2.0` and
+   `postgres:17.10-trixie`, starts Postgres, waits for it to be healthy,
+   then starts the MCP server (registers `local_pg`, migrates the
+   `dmigrate_state` schema).
+5. Open this project in Claude Code. `.mcp.json` is checked in but
+   **untrusted by default** — Claude Code shows the `d-migrate` server as
+   "⏸ Pending approval" until you approve it once (`claude mcp list` /
+   the `/mcp` prompt). New tools only show up in a *fresh* Claude Code
+   session started after approval.
+6. `./state` (file-backed MCP artifacts) and the `pg-data` Docker volume
+   are created on first run, gitignored, and local to your machine — a
+   fresh clone starts with empty state.
 
 ## How it's wired
 
-- **Auth**: `--auth-mode disabled`, strikt Loopback-only (`127.0.0.1`).
-- **MCP-State-Dir**: `./state`, in den Container gemountet, Host-User-Owned
-  (`.env` setzt `UID`/`GID`) — dateibasierte Upload-Segmente/Artefakte.
-- **DB-Connection**: lokales Postgres (`postgres:17.10-trixie`,
-  `127.0.0.1:${PG_PORT:-5433}`) als Connection `local_pg`
-  (`.d-migrate.yaml`, Tenant `default`).
-- **Server-State**: Jobs/Quotas/Idempotency/Schema-Stores JDBC-backed im
-  selben Postgres, Schema `dmigrate_state` (`server.state` in
-  `.d-migrate.yaml`, `migrations.auto: true`).
-- **Policy**: `policy-rules.yaml` erlaubt read-only/planende `*_start`-Tools
-  für Tenant `default`; Schreib-Tools (`data_import_start`,
+- **Auth**: `--auth-mode disabled` — strictly loopback-only (`127.0.0.1`).
+- **MCP state dir**: `./state`, bind-mounted into the container and owned
+  by the host user (`.env` sets `UID`/`GID`) — holds file-backed upload
+  segments and artifact content.
+- **DB connection**: a local Postgres (`postgres:17.10-trixie`,
+  `127.0.0.1:${PG_PORT:-5433}`) is wired in as connection `local_pg`
+  (`.d-migrate.yaml`, tenant `default`).
+- **Server-state**: jobs, quotas, idempotency, schema/artifact stores are
+  JDBC-backed in the same Postgres, schema `dmigrate_state`
+  (`server.state` in `.d-migrate.yaml`, `migrations.auto: true`).
+- **Policy**: `policy-rules.yaml` allows read-only/planning `*_start`
+  tools for tenant `default`; write tools (`data_import_start`,
   `data_transfer_start`, `testdata_execute`,
-  `procedure_transform_execute`) verlangen eine Freigabe
+  `procedure_transform_execute`) require an approval
   (`mcp approval-grant issue`).
 
 ## Usage
