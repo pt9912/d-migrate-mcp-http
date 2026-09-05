@@ -6,8 +6,9 @@
 
 Ein lokales Docker-Compose-Setup, das den
 [d-migrate](https://github.com/pt9912/d-migrate)-MCP-Server (HTTP-Transport)
-gegen eine echte Postgres-Testdatenbank betreibt und project-scoped in
-Claude Code registriert (`.mcp.json`). Für alle, die d-migrates
+gegen echte Postgres- und SQL-Server-Testdatenbanken betreibt und
+project-scoped in Claude Code registriert (`.mcp.json`). Für alle, die
+d-migrates
 Schema-/Daten-Tools als MCP-Tools aus einer Claude-Code-Session heraus
 aufrufen wollen, ohne d-migrate manuell zu bauen, zu installieren oder
 Connections/State von Hand zu verdrahten.
@@ -19,8 +20,9 @@ Connections/State von Hand zu verdrahten.
 - Nach einmaliger Freigabe des project-scoped `.mcp.json`-Servers in
   Claude Code stehen 22 Tools zur Verfügung (`schema_validate`,
   `schema_reverse_start`, `data_profile_start`, `job_status_get`, …).
-- `schema_reverse_start` gegen die verdrahtete Connection `local_pg`
-  liefert `SUCCEEDED` mit Artefakt — verifiziert per Tool-Call.
+- `schema_reverse_start` gegen beide verdrahteten Connections (`local_pg`,
+  `local_mssql`) liefert `SUCCEEDED` mit Artefakt — bei beiden per
+  Tool-Call verifiziert.
 - Ein laufender Job übersteht `docker compose restart d-migrate-mcp` —
   Server-State liegt in Postgres, nicht in-memory; verifiziert (Job vor
   Neustart erzeugt, `job_status_get` liefert danach denselben Status).
@@ -71,16 +73,24 @@ ausführen könnte — nicht auf Vorrat.
    Container auf Loopback binden und trotzdem vom Host erreichbar sein
    kann) ist **Linux-only** — funktioniert so nicht unter macOS/Windows
    Docker Desktop.
-2. Ports müssen frei sein: `8787` (MCP) und `5433` (Postgres, siehe
-   `PG_PORT` in `.env` — bei Kollision anpassen).
-3. `cp .env.example .env` und ein echtes `POSTGRES_PASSWORD` setzen — muss
-   synchron zum Passwort in `D_MIGRATE_LOCAL_PG_URL` bleiben (gleiche
-   Datei, zwei Stellen, keine Variablen-Interpolation dazwischen). `.env`
-   ist gitignored, wird nie committet.
-4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.2.0` und
-   `postgres:17.10-trixie`, startet Postgres, wartet auf „healthy“, dann
-   den MCP-Server (registriert `local_pg`, migriert das
-   `dmigrate_state`-Schema).
+2. Ports müssen frei sein: `8787` (MCP), `5433` (Postgres, siehe
+   `PG_PORT`) und `1433` (SQL Server, siehe `MSSQL_PORT`) in `.env` — bei
+   Kollision anpassen.
+3. `cp .env.example .env` und echte Passwörter setzen — `POSTGRES_PASSWORD`
+   und `MSSQL_SA_PASSWORD` müssen jeweils synchron zum Passwort in
+   `D_MIGRATE_LOCAL_PG_URL` / `D_MIGRATE_LOCAL_MSSQL_URL` bleiben (gleiche
+   Datei, je zwei Stellen, keine Variablen-Interpolation dazwischen).
+   `MSSQL_SA_PASSWORD` muss die SQL-Server-Komplexitätsregel erfüllen
+   (mind. 8 Zeichen, 3 von 4 Kategorien) und URL-reservierte Zeichen
+   (`@ : / ? # %`) vermeiden, damit es in der URL nicht percent-encoded
+   werden muss. `.env` ist gitignored, wird nie committet.
+4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.2.0`,
+   `postgres:17.10-trixie` und `mcr.microsoft.com/mssql/server:2022-latest`,
+   startet Postgres und SQL Server, wartet auf „healthy“ bei beiden, führt
+   einmalig `mssql-init` aus (legt die Datenbank `dmigrate` an — SQL
+   Servers Default-Datenbank `master` wird bewusst nicht als Ziel genutzt),
+   dann den MCP-Server (registriert `local_pg` und `local_mssql`, migriert
+   das `dmigrate_state`-Schema).
 5. Projekt in Claude Code öffnen. `.mcp.json` ist eingecheckt, aber
    **standardmäßig nicht vertraut** — Claude Code zeigt `d-migrate` als
    „⏸ Pending approval“, bis einmal bestätigt wird (`claude mcp list` /
@@ -95,8 +105,10 @@ ausführen könnte — nicht auf Vorrat.
 - **Auth**: `--auth-mode disabled`, strikt Loopback-only (`127.0.0.1`).
 - **MCP-State-Dir**: `./state`, in den Container gemountet, Host-User-Owned
   (`.env` setzt `UID`/`GID`) — dateibasierte Upload-Segmente/Artefakte.
-- **DB-Connection**: lokales Postgres (`postgres:17.10-trixie`,
-  `127.0.0.1:${PG_PORT:-5433}`) als Connection `local_pg`
+- **DB-Connections**: lokales Postgres (`postgres:17.10-trixie`,
+  `127.0.0.1:${PG_PORT:-5433}`) als `local_pg`, und lokaler SQL Server
+  (`mcr.microsoft.com/mssql/server:2022-latest`,
+  `127.0.0.1:${MSSQL_PORT:-1433}`, Datenbank `dmigrate`) als `local_mssql`
   (`.d-migrate.yaml`, Tenant `default`).
 - **Server-State**: Jobs/Quotas/Idempotency/Schema-Stores JDBC-backed im
   selben Postgres, Schema `dmigrate_state` (`server.state` in

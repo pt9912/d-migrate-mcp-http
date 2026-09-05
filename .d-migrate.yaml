@@ -17,6 +17,11 @@ database:
       dialectId: postgresql
       sensitivity: NON_PRODUCTION
       credentialRef: "env:D_MIGRATE_LOCAL_PG_URL"
+    local_mssql:
+      displayName: "Lokaler Test-SQL-Server"
+      dialectId: mssql
+      sensitivity: NON_PRODUCTION
+      credentialRef: "env:D_MIGRATE_LOCAL_MSSQL_URL"
 
 # JDBC-backed server-state (job/quota/idempotency + schema/artifact-Stores)
 # fuer "mcp serve" -- wird ueber denselben Pfad wie --connection-config
