@@ -88,7 +88,7 @@ ausführen könnte — nicht auf Vorrat.
    URL-reservierte Zeichen (`@ : / ? # %`) vermeiden, damit sie in der URL
    nicht percent-encoded werden müssen. `.env` ist gitignored, wird nie
    committet.
-4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.4.0`,
+4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.5.0`,
    `postgres:17.10-trixie`, `mcr.microsoft.com/mssql/server:2022-latest`
    und `mysql:8.4`, startet alle drei, wartet auf „healthy“, führt
    einmalig `mssql-init` aus (legt die Datenbank `dmigrate` an — SQL
@@ -150,7 +150,7 @@ make restart   # restart d-migrate-mcp — pick up .d-migrate.yaml / policy-rule
 
 ## Upgrading
 
-Bump the image tag in `docker-compose.yml` (pinned to `1.4.0`), then
+Bump the image tag in `docker-compose.yml` (pinned to `1.5.0`), then
 `make up`.
 
 For production/multi-host use, switch `--auth-mode` to `jwt-jwks` (see
