@@ -21,9 +21,10 @@ Connections/State von Hand zu verdrahten.
 - Nach einmaliger Freigabe des project-scoped `.mcp.json`-Servers in
   Claude Code stehen 22 Tools zur Verfügung (`schema_validate`,
   `schema_reverse_start`, `data_profile_start`, `job_status_get`, …).
-- `schema_reverse_start` gegen jede der vier verdrahteten Connections
-  (`local_pg`, `local_mssql`, `local_mysql`, `local_sqlite`) liefert
-  `SUCCEEDED` mit Artefakt — bei allen vieren per Tool-Call verifiziert.
+- `schema_reverse_start` gegen jede der fuenf verdrahteten Connections
+  (`local_pg`, `local_mssql`, `local_mysql`, `local_sqlite`,
+  `local_oracle`) liefert
+  `SUCCEEDED` mit Artefakt — bei allen fuenfen per Tool-Call verifiziert.
 - Ein laufender Job übersteht `docker compose restart d-migrate-mcp` —
   Server-State liegt in Postgres, nicht in-memory; verifiziert (Job vor
   Neustart erzeugt, `job_status_get` liefert danach denselben Status).
@@ -122,7 +123,11 @@ ausführen könnte — nicht auf Vorrat.
   `local_mysql`; eine SQLite-Datei unter `./sqlite-data/local.db` (wird
   bei Bedarf angelegt, `?spatialite=true` lädt das im
   d-migrate-Runtime-Image bereits enthaltene `mod_spatialite`) als
-  `local_sqlite`.
+  `local_sqlite`; lokales Oracle
+  (`gvenzl/oracle-free:23-slim-faststart`, `127.0.0.1:${ORACLE_PORT:-1521}`,
+  FREEPDB1, App-User `dmigrate`) als `local_oracle` (der erste Start legt
+  den User an und braucht einige Minuten; Bereitschaft wird ueber das
+  `healthcheck.sh` des Images gepollt).
 - **Server-State**: Jobs/Quotas/Idempotency/Schema-Stores JDBC-backed im
   selben Postgres, Schema `dmigrate_state` (`server.state` in
   `.d-migrate.yaml`, `migrations.auto: true`).

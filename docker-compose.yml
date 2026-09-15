@@ -73,6 +73,29 @@ services:
       retries: 20
       start_period: 20s
 
+  # Lokales Oracle (FREEPDB1) für Cross-Dialect-Round-Trips PG <-> Oracle.
+  # gvenzl/oracle-free: APP_USER wird beim ersten Start in FREEPDB1 angelegt
+  # (inkl. Tablespace-Quota). Das faststart-Varianten-Image bootet nach dem
+  # ersten Start in ~1-2 Min. Der eingebaute HEALTHCHECK des Images gilt.
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    container_name: d-migrate-oracle
+    restart: unless-stopped
+    environment:
+      ORACLE_PASSWORD: "${ORACLE_PASSWORD}"
+      APP_USER: dmigrate
+      APP_USER_PASSWORD: "${ORACLE_PASSWORD}"
+    ports:
+      - "127.0.0.1:${ORACLE_PORT:-1521}:1521"
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+
   d-migrate-mcp:
     image: ghcr.io/pt9912/d-migrate:1.7.0
     container_name: d-migrate-mcp
@@ -82,6 +105,8 @@ services:
       mssql-init:
         condition: service_completed_successfully
       mysql:
+        condition: service_healthy
+      oracle:
         condition: service_healthy
     # host networking so the server can bind 127.0.0.1 (required for
     # --auth-mode disabled, which is strictly loopback-only) while still
@@ -113,3 +138,4 @@ volumes:
   pg-data:
   mssql-data:
   mysql-data:
+  oracle-data:

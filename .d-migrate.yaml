@@ -39,6 +39,15 @@ database:
       sensitivity: NON_PRODUCTION
       credentialRef: "env:D_MIGRATE_LOCAL_SQLITE_URL"
 
+    local_oracle:
+      # Lokales Oracle (FREEPDB1, gvenzl/oracle-free im Compose-Service
+      # "oracle"). APP_USER "dmigrate" wird beim ersten Containerstart
+      # angelegt; Passwort wie bei den anderen Verbindungen via .env.
+      displayName: "Lokales Test-Oracle (FREEPDB1)"
+      dialectId: oracle
+      sensitivity: NON_PRODUCTION
+      credentialRef: "env:D_MIGRATE_LOCAL_ORACLE_URL"
+
 # JDBC-backed server-state (job/quota/idempotency + schema/artifact-Stores)
 # fuer "mcp serve" -- wird ueber denselben Pfad wie --connection-config
 # geladen (McpServeWiring.resolveServerStateConfigOrExit), kein eigenes

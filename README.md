@@ -20,8 +20,9 @@ state manually.
 - Once you approve the project-scoped `.mcp.json` server in Claude Code,
   22 tools are available (`schema_validate`, `schema_reverse_start`,
   `data_profile_start`, `job_status_get`, …).
-- `schema_reverse_start` against any of the four wired-up connections
-  (`local_pg`, `local_mssql`, `local_mysql`, `local_sqlite`) returns
+- `schema_reverse_start` against any of the five wired-up connections
+  (`local_pg`, `local_mssql`, `local_mysql`, `local_sqlite`,
+  `local_oracle`) returns
   `SUCCEEDED` with an artifact — verified via live tool calls against all
   four.
 - A running job survives `docker compose restart d-migrate-mcp` —
@@ -121,7 +122,11 @@ speculatively.
   local MySQL (`mysql:8.4`, `127.0.0.1:${MYSQL_PORT:-3306}`, database
   `dmigrate`) as `local_mysql`; a SQLite file at `./sqlite-data/local.db`
   (created on demand, `?spatialite=true` loads `mod_spatialite`, already
-  bundled in the d-migrate runtime image) as `local_sqlite`.
+  bundled in the d-migrate runtime image) as `local_sqlite`; local Oracle
+  (`gvenzl/oracle-free:23-slim-faststart`, `127.0.0.1:${ORACLE_PORT:-1521}`,
+  FREEPDB1, app user `dmigrate`) as `local_oracle` (first boot creates the
+  user and takes a few minutes; readiness is polled via the image's
+  `healthcheck.sh`).
 - **Server-state**: jobs, quotas, idempotency, schema/artifact stores are
   JDBC-backed in the same Postgres, schema `dmigrate_state`
   (`server.state` in `.d-migrate.yaml`, `migrations.auto: true`).
