@@ -18,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REPRO_DIR=scripts   # Seed: scripts/roundtrip-repro-postgres.sql
-EXPECT_FILE=scripts/roundtrip-expectations.env
+EXPECT_FILE=${EXPECT_FILE:-scripts/roundtrip-expectations.env}   # z.B. EXPECT_FILE=.repro-test/roundtrip-expectations-dev.env für dev-Builds
 UPDATE_EXPECT=false
 [ "${1:-}" = "--update-expectations" ] && UPDATE_EXPECT=true
 
