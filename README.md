@@ -142,8 +142,33 @@ speculatively.
 make up        # start (postgres, then d-migrate-mcp)
 make down      # stop
 make down-v    # stop and also drop the postgres volume
+make smoke     # round-trip smoke test (see below)
 make logs      # tail logs
 make restart   # restart d-migrate-mcp — pick up .d-migrate.yaml / policy-rules.yaml edits
+```
+
+## Round-trip smoke test
+
+`make smoke` drives a full cross-dialect round trip against the running
+stack (see `scripts/roundtrip-smoke.sh`): it seeds `local_pg` from a fixed
+repro schema (CHECK constraints, computed column, UNIQUE on unbounded TEXT,
+FKs with RESTRICT/NO ACTION, enum type, view), reverses all five
+connections, generates DDL into all five dialects, applies it with the
+native clients (sqlcmd/mysql/sqlite3/sqlplus — the MCP tools have no
+"apply" path), re-reverses and compares everything back. It asserts the
+version-bound expectation matrix in `scripts/roundtrip-expectations.env`
+(`GEN_*` = `schema_generate` status/skippedCount, `COMPARE_*` = finding
+counts vs. the PG reverse) plus the version-independent rule that no
+unchanged FK may surface as a compare finding.
+
+When a new d-migrate version legitimately changes the numbers (e.g. the
+upstream fix for Oracle's skipped-object undercount raises `GEN_ORACLE_SKIPPED`
+from 3 to 5), review the diff deliberately and re-pin with
+`make smoke UPDATE=--update-expectations` — after review, not blind.
+
+```bash
+make smoke                          # run, compare against expectations
+make smoke UPDATE=--update-expectations   # re-pin after reviewed changes
 ```
 
 ## Docs

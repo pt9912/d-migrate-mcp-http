@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# Round-trip smoke test gegen den lokalen d-migrate MCP-Server (Compose-Stack).
+#
+# Fahrt: local_pg seeden -> schema_reverse auf allen 5 Connections ->
+# schema_generate in 5 Dialekte (status/skippedCount gegen Erwartungsmatrix)
+# -> DDL nativ anwenden (MSSQL/MySQL/SQLite/Oracle) -> reverse -> schema_compare
+# (PG-Reverse gegen jedes Ziel-Reverse; FK-Assertion + Finding-Zahl).
+#
+# Gebraucht wird: docker (laufender Stack, `make up`), jq, sqlite3, curl.
+# Ausgefuehrt:  scripts/roundtrip-smoke.sh [--update-expectations]
+#
+# Die Erwartungsmatrix liegt in scripts/roundtrip-expectations.env und ist an
+# die d-migrate-Version gebunden (siehe Header dort). Bei Versionssprung:
+# laufen lassen, Abweichungen pruefen, bewusst neu pinnen. Der MCP-Apply-Pfad
+# existiert nicht (die Tools kennen kein "DDL anwenden"), daher die nativen
+# Clients in den Compose-Containern.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+REPRO_DIR=scripts   # Seed: scripts/roundtrip-repro-postgres.sql
+EXPECT_FILE=scripts/roundtrip-expectations.env
+UPDATE_EXPECT=false
+[ "${1:-}" = "--update-expectations" ] && UPDATE_EXPECT=true
+
+MCP_URL=http://127.0.0.1:8787/mcp
+PROTOCOL=2025-11-25
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+set -a; set +e; . ./.env 2>/dev/null; set -e; set +a   # UID-Zeile in .env ist readonly — Fehler ignorieren, Rest laden
+
+fail() { echo "FAIL: $*" >&2; FAILED=1; }
+command -v jq >/dev/null || fail "jq nicht installiert"
+command -v sqlite3 >/dev/null || fail "sqlite3 nicht installiert"
+
+# ---------------------------------------------------------------- MCP client
+RPC_ID=0
+mcp_call() {  # $1=tool $2=args-json  -> stdout: Tool-Ergebnis (JSON-Text)
+  RPC_ID=$((RPC_ID + 1))
+  local body
+  body=$(jq -nc --argjson id "$RPC_ID" --arg tool "$1" --argjson args "$2" \
+    '{jsonrpc:"2.0",id:$id,method:"tools/call",params:{name:$tool,arguments:$args}}')
+  curl -sf -X POST "$MCP_URL" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H "MCP-Session-Id: $SESSION" \
+    -H "MCP-Protocol-Version: $PROTOCOL" \
+    -d "$body" | jq -re '.result.content[0].text'
+}
+
+mcp_session() {
+  local sid
+  sid=$(curl -sf -D - -o /dev/null -X POST "$MCP_URL" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d "$(jq -nc '{jsonrpc:"2.0",id:0,method:"initialize",params:{protocolVersion:$p,capabilities:{},clientInfo:{name:"roundtrip-smoke",version:"0.1"}}}' --arg p "$PROTOCOL")" \
+    | tr -d '\r' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}')
+  [ -n "$sid" ] || { echo "FAIL: kein MCP-Server auf $MCP_URL — laeuft der Stack (make up)?" >&2; exit 1; }
+  curl -sf -o /dev/null -X POST "$MCP_URL" \
+    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -H "MCP-Session-Id: $sid" -H "MCP-Protocol-Version: $PROTOCOL" \
+    -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  echo "$sid"
+}
+SESSION=$(mcp_session)
+
+await_job() {  # $1=jobId -> stdout: result-JSON des Jobs
+  local st res
+  for _ in $(seq 1 60); do
+    res=$(mcp_call job_status_get "{\"jobId\":\"$1\"}")
+    st=$(echo "$res" | jq -r '.status')
+    case "$st" in
+      SUCCEEDED) echo "$res"; return 0 ;;
+      FAILED|CANCELLED) fail "Job $1 endete: $st"; return 1 ;;
+    esac
+    sleep 2
+  done
+  fail "Job $1: Timeout nach 120s"; return 1
+}
+
+reverse_conn() {  # $1=connectionName -> stdout: schemaId
+  local job res art
+  job=$(mcp_call schema_reverse_start \
+    "{\"connectionId\":\"dmigrate://tenants/default/connections/$1\",\"idempotencyKey\":\"smoke-$(date +%s)-$1-$RANDOM\"}" \
+    | jq -r '.jobId')
+  res=$(await_job "$job") || return 1
+  art=$(echo "$res" | jq -r '.artifacts[0]' | sed 's|.*/artifacts/||')
+  mcp_call schema_list '{}' | jq -r --arg a "$art" \
+    '.schemas[] | select(.artifactRef==$a) | .schemaId'
+}
+
+# ------------------------------------------------------------ 1. Preflight
+echo "== 1. Preflight"
+FAILED=0
+for c in d-migrate-postgres d-migrate-mssql d-migrate-mysql d-migrate-oracle d-migrate-mcp; do
+  s=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$c" 2>/dev/null || echo "fehlt")
+  [ "$s" = healthy ] || [ "$s" = running ] || fail "$c: $s"
+done
+# d-migrate-Version protokollieren
+mcp_call capabilities_list '{}' | jq -r '"   Server: \(.serverName), MCP \(.mcpProtocolVersion)"'
+[ "$FAILED" = 0 ] || exit 1
+
+# ------------------------------------------------- 2. local_pg seeden
+echo "== 2. local_pg seeden (repro_schema.sql)"
+docker exec d-migrate-postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q \
+   -c "DROP VIEW IF EXISTS order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers; DROP TYPE IF EXISTS order_status;"'
+docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -v ON_ERROR_STOP=1 -q < "$REPRO_DIR/roundtrip-repro-postgres.sql"
+echo "   OK"
+
+# ------------------------------------------ 3. Reverse auf allen 5 Connections
+echo "== 3. schema_reverse auf allen 5 Connections"
+SCH_PG=$(reverse_conn local_pg);        echo "   local_pg     -> $SCH_PG"
+SCH_MSSQL=$(reverse_conn local_mssql);  echo "   local_mssql  -> $SCH_MSSQL"
+SCH_MYSQL=$(reverse_conn local_mysql);  echo "   local_mysql  -> $SCH_MYSQL"
+SCH_SQLITE=$(reverse_conn local_sqlite);echo "   local_sqlite -> $SCH_SQLITE"
+SCH_ORACLE=$(reverse_conn local_oracle);echo "   local_oracle -> $SCH_ORACLE"
+
+# ---------------------------------- 4. schema_generate in 5 Zieldialekte
+echo "== 4. schema_generate (Quelle: local_pg-Reverse) in 5 Dialekte"
+declare -A GEN_STATUS GEN_SKIPPED
+for t in POSTGRESQL MSSQL MYSQL SQLITE ORACLE; do
+  res=$(mcp_call schema_generate \
+    "{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_PG\",\"targetDialect\":\"$t\",\"format\":\"yaml\"}")
+  GEN_STATUS[$t]=$(echo "$res" | jq -r '.status')
+  GEN_SKIPPED[$t]=$(echo "$res" | jq -r '.skippedCount')
+  echo "$res" | jq -r '.ddl' > "$TMP/ddl_$t.sql"
+  echo "   $t: status=${GEN_STATUS[$t]} skipped=${GEN_SKIPPED[$t]}"
+done
+
+check_expect() {  # $1=Key in expectations  $2=Ist-Wert
+  local exp; exp=$(grep -E "^$1=" "$EXPECT_FILE" 2>/dev/null | cut -d= -f2 || true)
+  if [ -z "$exp" ]; then echo "   (keine Erwartung fuer $1, Ist=$2)"; return 0; fi
+  if [ "$exp" = "$2" ]; then echo "   OK  $1=$2"; return 0; fi
+  if $UPDATE_EXPECT; then
+    sed -i "s/^$1=.*/$1=$2/" "$EXPECT_FILE"
+    echo "   PINNED $1=$2 (war $exp)"
+  else
+    fail "$1: erwartet $exp, gemessen $2"
+  fi
+}
+check_expect GEN_PG_STATUS      "${GEN_STATUS[POSTGRESQL]}"
+check_expect GEN_PG_SKIPPED     "${GEN_SKIPPED[POSTGRESQL]}"
+check_expect GEN_MSSQL_SKIPPED  "${GEN_SKIPPED[MSSQL]}"
+check_expect GEN_MYSQL_SKIPPED  "${GEN_SKIPPED[MYSQL]}"
+check_expect GEN_SQLITE_SKIPPED "${GEN_SKIPPED[SQLITE]}"
+check_expect GEN_ORACLE_SKIPPED "${GEN_SKIPPED[ORACLE]}"
+
+# ------------------------------------- 5. DDL nativ anwenden (4 Ziele)
+echo "== 5. DDL anwenden (nativ)"
+# SQLite: Datei neu, Host-sqlite3
+rm -f sqlite-data/local.db
+sqlite3 sqlite-data/local.db < "$TMP/ddl_SQLITE.sql"; echo "   sqlite: OK"
+# MySQL: Datenbank neu anlegen
+docker exec d-migrate-mysql sh -c \
+  'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS dmigrate; CREATE DATABASE dmigrate;"' 2>/dev/null
+docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' 2>/dev/null \
+  < "$TMP/ddl_MYSQL.sql"; echo "   mysql: OK"
+# MSSQL: Tabellen/View droppen, dann apply
+docker exec d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
+  -P "$MSSQL_SA_PASSWORD" -d dmigrate -Q \
+  "IF OBJECT_ID('order_summary','V') IS NOT NULL DROP VIEW order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers;" \
+  > /dev/null
+docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
+  -P "$MSSQL_SA_PASSWORD" -d dmigrate \
+  < "$TMP/ddl_MSSQL.sql" > "$TMP/mssql_apply.log"
+if grep -qE 'Msg [0-9]+, Level 1[5-9]' "$TMP/mssql_apply.log"; then fail "mssql: DDL-Fehler (Log: $TMP/mssql_apply.log)"; fi
+echo "   mssql: OK"
+# Oracle: Tabellen/View droppen, dann apply (generierte DDL endet auf ';;').
+# Achtung: die generierte DDL quotet alle Identifier, d.h. die Objekte heissen
+# in user_objects kleingeschrieben ('customers') — deshalb UPPER()-Vergleich.
+docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
+  >/dev/null <<'EOF'
+BEGIN FOR o IN (SELECT object_name, object_type FROM user_objects WHERE UPPER(object_name) IN ('ORDER_SUMMARY','ORDER_ITEMS','ORDERS','PRODUCTS','CUSTOMERS') ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"'; END LOOP; END;
+/
+EOF
+sed 's/;;/;/g' "$TMP/ddl_ORACLE.sql" > "$TMP/ddl_ORACLE_norm.sql"
+docker cp "$TMP/ddl_ORACLE_norm.sql" d-migrate-oracle:/tmp/smoke_ddl.sql >/dev/null
+docker exec d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
+  @/tmp/smoke_ddl.sql > "$TMP/oracle_apply.log"
+# nur Zeilenanfang-Fehler zaehlen: die DDL-Kommentare enthalten "ORA-02329" etc.
+if grep -qE '^(ORA-|SP2-|ERROR at)' "$TMP/oracle_apply.log"; then fail "oracle: DDL-Fehler (Log: $TMP/oracle_apply.log)"; fi
+echo "   oracle: OK"
+
+# ------------------------------------------ 6. Reverse der 4 Ziele
+echo "== 6. schema_reverse der 4 angewendeten Ziele"
+RT_MSSQL=$(reverse_conn local_mssql);   echo "   local_mssql  -> $RT_MSSQL"
+RT_MYSQL=$(reverse_conn local_mysql);   echo "   local_mysql  -> $RT_MYSQL"
+RT_SQLITE=$(reverse_conn local_sqlite); echo "   local_sqlite -> $RT_SQLITE"
+RT_ORACLE=$(reverse_conn local_oracle); echo "   local_oracle -> $RT_ORACLE"
+
+# ------------------------------- 7. Compare PG-Reverse vs. jedes Ziel-Reverse
+echo "== 7. schema_compare: PG-Reverse gegen jedes Ziel-Reverse"
+declare -A RT_SCH=([MSSQL]=$RT_MSSQL [MYSQL]=$RT_MYSQL [SQLITE]=$RT_SQLITE [ORACLE]=$RT_ORACLE)
+declare -A COMPARE_N
+for t in MSSQL MYSQL SQLITE ORACLE; do
+  res=$(mcp_call schema_compare \
+    "{\"left\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_PG\"},\"right\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/${RT_SCH[$t]}\"},\"format\":\"yaml\"}")
+  COMPARE_N[$t]=$(echo "$res" | jq '.findings | length')
+  # FK-Assertion: die zwei NO-ACTION-FKs werden auf beiden Seiten gefaltet und
+  # duerfen NIE erscheinen. Der RESTRICT-FK (orders_customer_id_fkey) dagegen
+  # ist ein dokumentierter echter Aktionsunterschied (MSSQL/Oracle kennen kein
+  # RESTRICT) und darf melden.
+  fk=$(echo "$res" | jq -r '[.findings[].path // ""] | map(select(test("order_items_order_id_fkey|order_items_product_id_fkey"))) | length')
+  if [ "$fk" != 0 ]; then
+    fail "$t: $fk FK-Finding(s) auf NO-ACTION-FKs (Falschalarm-Klasse!)"
+  else
+    echo "   $t: ${COMPARE_N[$t]} Findings, 0 FK-Findings auf den NO-ACTION-FKs"
+  fi
+  check_expect "COMPARE_$t" "${COMPARE_N[$t]}"
+done
+
+# ------------------------------------------------------------- 8. Bericht
+echo
+echo "== Bericht"
+printf '   %-10s %-12s %-8s %-10s\n' Ziel 'gen skipped' 'status' 'compare'
+printf '   %-10s %-12s %-8s %-10s\n' MSSQL "${GEN_SKIPPED[MSSQL]}" "${GEN_STATUS[MSSQL]}" "${COMPARE_N[MSSQL]}"
+printf '   %-10s %-12s %-8s %-10s\n' MYSQL "${GEN_SKIPPED[MYSQL]}" "${GEN_STATUS[MYSQL]}" "${COMPARE_N[MYSQL]}"
+printf '   %-10s %-12s %-8s %-10s\n' SQLITE "${GEN_SKIPPED[SQLITE]}" "${GEN_STATUS[SQLITE]}" "${COMPARE_N[SQLITE]}"
+printf '   %-10s %-12s %-8s %-10s\n' ORACLE "${GEN_SKIPPED[ORACLE]}" "${GEN_STATUS[ORACLE]}" "${COMPARE_N[ORACLE]}"
+
+if [ "$FAILED" = 0 ]; then
+  echo "SMOKE OK"
+else
+  echo "SMOKE FEHLGESCHLAGEN — Abweichungen oben. Nach Pruefung: --update-expectations"
+  exit 1
+fi

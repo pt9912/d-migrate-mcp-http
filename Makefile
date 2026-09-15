@@ -2,7 +2,7 @@ DOCKER_COMPOSE ?= docker compose
 
 -include .env
 
-.PHONY: up down down-v logs restart
+.PHONY: up down down-v logs restart smoke
 
 up:
 	$(DOCKER_COMPOSE) up -d
@@ -18,3 +18,6 @@ logs:
 
 restart:
 	$(DOCKER_COMPOSE) restart d-migrate-mcp
+
+smoke:
+	bash scripts/roundtrip-smoke.sh $(UPDATE)

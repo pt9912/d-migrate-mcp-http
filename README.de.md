@@ -147,6 +147,33 @@ make logs      # tail logs
 make restart   # restart d-migrate-mcp — pick up .d-migrate.yaml / policy-rules.yaml edits
 ```
 
+## Round-Trip-Smoke-Test
+
+`make smoke` faehrt einen vollstaendigen Cross-Dialect-Round-Trip gegen den
+laufenden Stack (siehe `scripts/roundtrip-smoke.sh`): `local_pg` wird aus
+einem festen Repro-Schema geseedet (CHECK-Constraints, computed column,
+UNIQUE auf ungebundenem TEXT, FKs mit RESTRICT/NO ACTION, Enum-Typ, View),
+alle fuenf Connections werden zurueckgelesen, DDL in alle fuenf Dialekte
+generiert, mit den nativen Clients angewendet (sqlcmd/mysql/sqlite3/sqlplus
+— die MCP-Tools kennen kein "DDL anwenden"), wieder zurueckgelesen und
+verglichen. Geprueft werden die versionsgebundene Erwartungsmatrix in
+`scripts/roundtrip-expectations.env` (`GEN_*` = status/skippedCount von
+`schema_generate`, `COMPARE_*` = Finding-Zahl gegen das PG-Reverse) plus die
+versionsunabhaengige Regel, dass kein unveraenderter FK als Compare-Finding
+erscheint.
+
+Aendert eine neue d-migrate-Version die Zahlen legitim (z. B. hebt der
+upstream-Fix fuer Oracles Skipped-Object-Unterzaehlung
+`GEN_ORACLE_SKIPPED` von 3 auf 5), den Diff bewusst pruefen und neu pinnen
+mit `make smoke UPDATE=--update-expectations` — nach Pruefung, nicht blind.
+
+```bash
+make smoke                                  # Lauf gegen Erwartungen
+make smoke UPDATE=--update-expectations     # nach gepruefter Aenderung neu pinnen
+```
+
+## Docs
+
 ## Docs
 
 - [Anwenderhandbuch](https://github.com/pt9912/d-migrate/blob/main/docs/user/anwenderhandbuch.md)
