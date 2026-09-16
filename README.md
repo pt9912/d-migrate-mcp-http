@@ -167,8 +167,10 @@ version-bound expectation matrix in `scripts/roundtrip-expectations.env`
 counts vs. the PG reverse) plus the version-independent rule that no
 unchanged FK may surface as a compare finding.
 
-The SQLite leg runs in the small helper image `tools/sqlite-spatial`
-(`make sqlite-tool`; sqlite3 + mod_spatialite) — the host has no
+The SQLite leg runs in the small helper image `tools/harness-tools`
+(`make harness-tools`; sqlite3 + mod_spatialite); the matrix's Python type
+check uses the `py` stage of the same file
+(`make harness-tools` builds both) — the host has no
 SpatiaLite extension and the d-migrate runtime image ships no sqlite3 CLI.
 The smoke builds it automatically if it is missing.
 

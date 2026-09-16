@@ -171,8 +171,10 @@ verglichen. Geprueft werden die versionsgebundene Erwartungsmatrix in
 versionsunabhaengige Regel, dass kein unveraenderter FK als Compare-Finding
 erscheint.
 
-Der SQLite-Leg laeuft im kleinen Werkzeug-Image `tools/sqlite-spatial`
-(`make sqlite-tool`; sqlite3 + mod_spatialite) — der Host hat keine
+Der SQLite-Leg laeuft im kleinen Werkzeug-Image `tools/harness-tools`
+(`make harness-tools`; sqlite3 + mod_spatialite); der Python-Typcheck der
+Matrix nutzt die Stage `py` derselben Datei (`make harness-tools` baut
+beide) — der Host hat keine
 SpatiaLite-Extension, das d-migrate-Runtime-Image keinen sqlite3-CLI. Der
 Smoke baut es bei Bedarf selbst.
 

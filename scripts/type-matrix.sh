@@ -11,7 +11,7 @@
 #
 # Aufruf:  scripts/type-matrix.sh [--keep]      (--keep laesst die Tabellen stehen)
 # Gebraucht: laufender Stack (make up), jq, curl, docker; SQLite-Legs laufen
-# im Werkzeug-Image tools/sqlite-spatial (wird bei Bedarf gebaut).
+# im Werkzeug-Image tools/harness-tools (wird bei Bedarf gebaut).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -25,7 +25,8 @@ KEEP=false
 
 MCP_URL=http://127.0.0.1:8787/mcp
 PROTOCOL=2025-11-25
-SQLITE_TOOL_IMAGE=${SQLITE_TOOL_IMAGE:-dmigrate-sqlite-tool:local}
+HARNESS_TOOL_IMAGE=${HARNESS_TOOL_IMAGE:-dmigrate-harness-tools:local}
+PYTHON_IMAGE=${PYTHON_IMAGE:-dmigrate-harness-python:local}   # Stage 'py' aus tools/harness-tools
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -35,8 +36,10 @@ FAILED=0
 fail() { echo "FAIL: $*" >&2; FAILED=1; }
 
 command -v jq >/dev/null || { echo "FAIL: jq fehlt" >&2; exit 1; }
-docker image inspect "$SQLITE_TOOL_IMAGE" >/dev/null 2>&1 \
-  || docker build -q -t "$SQLITE_TOOL_IMAGE" tools/sqlite-spatial >/dev/null
+docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1 \
+  || docker build -q -t "$HARNESS_TOOL_IMAGE" tools/harness-tools >/dev/null
+docker image inspect "$PYTHON_IMAGE" >/dev/null 2>&1 \
+  || docker build -q --target py -t "$PYTHON_IMAGE" tools/harness-tools >/dev/null
 
 RPC_ID=0
 . scripts/lib/mcp-client.sh
@@ -75,7 +78,7 @@ SQL
 seed_sqlite() {
   rm -f sqlite-data/local.db
   docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD/sqlite-data:/data" -v "$PWD/scripts/types:/seed:ro" \
-    --entrypoint sqlite3 "$SQLITE_TOOL_IMAGE" /data/local.db < scripts/types/sqlite.sql >/dev/null || true
+    --entrypoint sqlite3 "$HARNESS_TOOL_IMAGE" /data/local.db < scripts/types/sqlite.sql >/dev/null || true
 }
 seed_of() { case "$1" in PG) seed_pg;; MSSQL) seed_mssql;; MYSQL) seed_mysql;; SQLITE) seed_sqlite;; ORACLE) seed_oracle;; esac; }
 
@@ -103,7 +106,7 @@ apply_oracle() {
 apply_sqlite() {
   docker run --rm -i --user "$(id -u):$(id -g)" \
     -v "$PWD/sqlite-data:/data" -v "$(dirname "$2"):/ddl:ro" \
-    --entrypoint sqlite3 "$SQLITE_TOOL_IMAGE" \
+    --entrypoint sqlite3 "$HARNESS_TOOL_IMAGE" \
     -cmd "PRAGMA trusted_schema=ON;" \
     -cmd "SELECT load_extension('mod_spatialite');" \
     -cmd "SELECT InitSpatialMetaData(1);" \
@@ -166,9 +169,48 @@ SQL
 clean_sqlite() { rm -f sqlite-data/local.db; }
 clean_of() { case "$1" in PG) clean_pg;; MSSQL) clean_mssql;; MYSQL) clean_mysql;; SQLITE) clean_sqlite;; ORACLE) clean_oracle;; esac; }
 
+# ------------------------------------------- Stille Typverluste (zweite Achse)
+# Vergleicht den QUELL-KATALOG mit dem neutralen Modell: Spalten, deren
+# Quelltyp spezifisch ist, im Modell aber auf text/char landen (oder als enum
+# mit haengendem ref_type), tauchen im Quell<->Ziel-Vergleich NICHT auf — beide
+# Seiten sind dort gleichermassen verflacht. SQLite bleibt ausgenommen: seine
+# deklarierten Typnamen sind nominal, es gibt dort nichts zu verlieren.
+native_types_pg() {
+  docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+    "SELECT column_name || '|' || data_type FROM information_schema.columns WHERE table_name='type_matrix' ORDER BY ordinal_position" 2>/dev/null
+}
+native_types_mssql() {
+  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" \
+    -d dmigrate -W -s'|' -h-1 -Q "SELECT c.name + '|' + t.name FROM sys.columns c JOIN sys.types t ON t.user_type_id=c.user_type_id WHERE c.object_id=OBJECT_ID('type_matrix') ORDER BY c.column_id" 2>/dev/null
+}
+native_types_mysql() {
+  docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -B -e "SELECT CONCAT(COLUMN_NAME,'"'"'|'"'"',COLUMN_TYPE) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='"'"'type_matrix'"'"' ORDER BY ORDINAL_POSITION" dmigrate' 2>/dev/null
+}
+native_types_oracle() {
+  docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 2>/dev/null <<'SQL'
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF TRIMSPOOL ON LINESIZE 200
+SELECT LOWER(column_name) || '|' || data_type FROM user_tab_columns WHERE UPPER(table_name) = 'TYPE_MATRIX' ORDER BY column_id;
+EXIT
+SQL
+}
+silent_losses_of() {  # $1=Dialekt $2=schemaId -> stdout: "spalte|quelltyp|neutraltyp"
+  [ "$1" = "SQLITE" ] && return 0
+  local nat="$TMP/native_$1.txt" art
+  "native_types_$(echo "$1" | tr 'A-Z' 'a-z')" > "$nat" 2>/dev/null || true
+  art=$(artifact_of_schema "$2")
+  [ -n "$art" ] || return 0
+  mcp_call artifact_chunk_get "{\"artifactId\":\"$art\"}" 2>/dev/null | jq -r '.text' > "$TMP/neutral_$1.yaml" || return 0
+  # im Python-Image ausfuehren (Stage 'py' unseres Dockerfiles): weder Host
+  # noch d-migrate-Image bringen python3 mit. Mount-Ziel NICHT /lib nennen —
+  # das ueberschreibt das Loader-Verzeichnis und python3 startet nicht.
+  docker run --rm -v "$TMP:/in:ro" -v "$PWD/scripts/lib:/harness-lib:ro" \
+    --entrypoint python3 "$PYTHON_IMAGE" /harness-lib/silent-loss-check.py \
+    "/in/native_$1.txt" "/in/neutral_$1.yaml" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------- Matrix
 echo "== Typ-Matrix (Quelle -> Ziel: Findings des Compare Quelle<->Ziel, ohne SCHEMA_NAME_CHANGED)"
-declare -A CELL CODES
+declare -A CELL CODES SILENT
 echo "-- Testdatenbanken leeren"
 for d in $DIALECTS; do clean_of "$d"; done
 for src in $DIALECTS; do
@@ -177,6 +219,8 @@ for src in $DIALECTS; do
     echo "   Seed $src fehlgeschlagen (Log: $TMP/seed_$src.log)"; continue
   fi
   SCH_SRC=$(reverse_conn "$(conn_of "$src")") || { echo "   Reverse $src fehlgeschlagen"; continue; }
+  # zweite Achse: Verluste schon beim Zuruecklesen (unsichtbar im Quell<->Ziel-Vergleich)
+  SILENT[$src]=$(silent_losses_of "$src" "$SCH_SRC")
   for dst in $DIALECTS; do
     [ "$src" = "$dst" ] && continue
     prof=$(profile_of "$dst")
@@ -244,6 +288,24 @@ for src in $DIALECTS; do
     [ "$src" = "$dst" ] && continue
     [ -n "${CODES[$src,$dst]:-}" ] && printf '  %-7s -> %-7s %s\n' "$src" "$dst" "${CODES[$src,$dst]}"
   done
+done
+
+echo
+echo "== Stille Typverluste beim Reverse (Quelltyp -> neutraler Typ, ohne Finding)"
+echo "   Diese Spalten sind fuer den Quell<->Ziel-Vergleich unsichtbar: beide Seiten"
+echo "   tragen im Modell denselben verflachten Typ."
+for src in $DIALECTS; do
+  if [ "$src" = "SQLITE" ]; then
+    printf '  %-7s (ausgenommen: deklarierte SQLite-Typen sind nominal)\n' "$src"
+    continue
+  fi
+  if [ -n "${SILENT[$src]:-}" ]; then
+    n=$(printf '%s\n' "${SILENT[$src]}" | grep -c .)
+    printf '  %-7s %d:\n' "$src" "$n"
+    printf '%s\n' "${SILENT[$src]}" | grep . | sed 's/^/      /'
+  else
+    printf '  %-7s  0\n' "$src"
+  fi
 done
 
 if [ "$KEEP" = false ]; then

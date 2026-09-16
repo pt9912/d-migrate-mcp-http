@@ -47,6 +47,12 @@ await_job() {
   fail "Job $1: Timeout"; return 1
 }
 
+# $1=schemaId -> stdout: artifactId (fuer artifact_chunk_get)
+artifact_of_schema() {
+  mcp_call schema_list '{"pageSize":60}' | jq -r --arg s "$1" \
+    '.schemas[] | select(.schemaId==$s) | .artifactRef'
+}
+
 # $1=connectionName [$2=includes als JSON-Array, z.B. '["type_matrix"]']
 #   -> stdout: schemaId des Reverse-Artefakts
 reverse_conn() {

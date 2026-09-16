@@ -1,7 +1,7 @@
 -- Typ-Seed SQLite/SpatiaLite: SQLite hat keine festen Typen, sondern
 -- Affinitaeten — hier beides: die deklarierten Typnamen, die ein Reverse
 -- vorfindet, plus eine typenlose Spalte und echte SpatiaLite-Geometrien.
--- Wird im Werkzeug-Image (tools/sqlite-spatial) mit mod_spatialite ausgefuehrt.
+-- Wird im Werkzeug-Image (tools/harness-tools) mit mod_spatialite ausgefuehrt.
 PRAGMA trusted_schema=ON;
 -- Pfadlos laden: die Extension wird ueber den System-Cache gefunden und
 -- funktioniert damit auch auf anderen Architekturen (arm64/macOS-Docker).

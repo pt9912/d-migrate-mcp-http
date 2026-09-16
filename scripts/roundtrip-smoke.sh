@@ -7,7 +7,7 @@
 # (PG-Reverse gegen jedes Ziel-Reverse; FK-Assertion + Finding-Zahl).
 #
 # Gebraucht wird: docker (laufender Stack, `make up`), jq, curl.
-# Der SQLite-Leg laeuft im Werkzeug-Image tools/sqlite-spatial (sqlite3 +
+# Der SQLite-Leg laeuft im Werkzeug-Image tools/harness-tools (sqlite3 +
 # mod_spatialite; der Host hat keine Spatialite-Extension, das d-migrate-Image
 # keinen sqlite3-CLI) — es wird bei Bedarf automatisch gebaut.
 # Ausgefuehrt:  scripts/roundtrip-smoke.sh [--update-expectations]
@@ -30,7 +30,7 @@ cd "$(dirname "$0")/.."
 
 REPRO_DIR=scripts   # Seed: scripts/roundtrip-repro-postgres.sql
 EXPECT_FILE=${EXPECT_FILE:-scripts/roundtrip-expectations.env}   # z.B. EXPECT_FILE=.repro-test/roundtrip-expectations-dev.env für dev-Builds
-SQLITE_TOOL_IMAGE=${SQLITE_TOOL_IMAGE:-dmigrate-sqlite-tool:local}
+HARNESS_TOOL_IMAGE=${HARNESS_TOOL_IMAGE:-dmigrate-harness-tools:local}
 UPDATE_EXPECT=false
 [ "${1:-}" = "--update-expectations" ] && UPDATE_EXPECT=true
 
@@ -44,9 +44,9 @@ set -a; set +e; . ./.env 2>/dev/null; set -e; set +a   # UID-Zeile in .env ist r
 fail() { echo "FAIL: $*" >&2; FAILED=1; }
 command -v jq >/dev/null || fail "jq nicht installiert"
 # Werkzeug-Image fuer den SQLite-/SpatiaLite-Leg (einmalig bauen, dann gecacht)
-docker image inspect "$SQLITE_TOOL_IMAGE" >/dev/null 2>&1 \
-  || docker build -q -t "$SQLITE_TOOL_IMAGE" tools/sqlite-spatial >/dev/null 2>&1 \
-  || fail "Werkzeug-Image $SQLITE_TOOL_IMAGE fehlt (make sqlite-tool)"
+docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1 \
+  || docker build -q -t "$HARNESS_TOOL_IMAGE" tools/harness-tools >/dev/null 2>&1 \
+  || fail "Werkzeug-Image $HARNESS_TOOL_IMAGE fehlt (make harness-tools)"
 
 # ---------------------------------------------------------------- MCP client
 RPC_ID=0
@@ -180,7 +180,7 @@ rm -f sqlite-data/local.db
 # Lauf sonst hier abbrechen, statt den Fehler unten zu melden.
 if ! docker run --rm -i --user "$(id -u):$(id -g)" \
   -v "$PWD/sqlite-data:/data" -v "$TMP:/ddl:ro" \
-  --entrypoint sqlite3 "$SQLITE_TOOL_IMAGE" \
+  --entrypoint sqlite3 "$HARNESS_TOOL_IMAGE" \
   -cmd "PRAGMA trusted_schema=ON;" \
   -cmd "SELECT load_extension('mod_spatialite');" \
   -cmd "SELECT InitSpatialMetaData(1);" \
