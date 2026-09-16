@@ -14,14 +14,16 @@
 # laufen lassen, Abweichungen pruefen, bewusst neu pinnen. Der MCP-Apply-Pfad
 # existiert nicht (die Tools kennen kein "DDL anwenden"), daher die nativen
 # Clients in den Compose-Containern.
-set -euo pipefail
-cd "$(dirname "$0")/.."
-
-# Bash >= 4 noetig (assoziative Arrays via declare -A).
+# Bash >= 4 noetig (assoziative Arrays via declare -A). Muss VOR `set -o
+# pipefail` stehen: dash/sh bricht dort sonst mit "Illegal option" ab,
+# bevor diese Pruefung greift.
 if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSION%%.*}" -lt 4 ]; then
   echo "FAIL: bash >= 4 noetig (associative arrays). Gefunden: ${BASH_VERSION:-nicht bash}" >&2
   exit 1
 fi
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
 REPRO_DIR=scripts   # Seed: scripts/roundtrip-repro-postgres.sql
 EXPECT_FILE=${EXPECT_FILE:-scripts/roundtrip-expectations.env}   # z.B. EXPECT_FILE=.repro-test/roundtrip-expectations-dev.env für dev-Builds
