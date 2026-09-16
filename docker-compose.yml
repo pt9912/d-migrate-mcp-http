@@ -1,6 +1,14 @@
 services:
   postgres:
-    image: postgres:17.10-trixie
+    # postgis/postgis statt postgres: gleiche PG-Basis, zusaetzlich die
+    # PostGIS-Extension im Image — noetig, damit "geometry"-Spalten auf der
+    # PG-Quelle getestet werden koennen. Die Extension wird per
+    # CREATE EXTENSION in ein EIGENES Schema "postgis" installiert (nicht
+    # "public"): sonst legt PostGIS ~1000 Funktionen in public ab, die das
+    # schema_reverse als functions:-Block einsammelt und die Compare-Zahlen
+    # auffluten. PG 18 verlangt den Volume-Mount auf /var/lib/postgresql
+    # (ohne /data) und ein frisches Volume (Major-Version).
+    image: postgis/postgis:18-3.6@sha256:60f6ad1d21ea86a67d47780b9a0d1e1d200500f62b19293fa834d0dea80b8677
     container_name: d-migrate-postgres
     restart: unless-stopped
     env_file:
@@ -8,7 +16,7 @@ services:
     ports:
       - "127.0.0.1:${PG_PORT:-5433}:5432"
     volumes:
-      - pg-data:/var/lib/postgresql/data
+      - pg-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s

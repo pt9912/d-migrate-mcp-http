@@ -92,7 +92,8 @@ ausführen könnte — nicht auf Vorrat.
    nicht percent-encoded werden müssen. `.env` ist gitignored, wird nie
    committet.
 4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.7.1`,
-   `postgres:17.10-trixie`, `mcr.microsoft.com/mssql/server:2022-latest`,
+   `postgis/postgis:18-3.6` (PostgreSQL 18 + PostGIS 3.6, digest-gepinnt),
+   `mcr.microsoft.com/mssql/server:2022-latest`,
    `mysql:8.4` und `gvenzl/oracle-free:23-slim-faststart`, startet sie,
    wartet auf „healthy“, führt einmalig `mssql-init` aus (legt die
    Datenbank `dmigrate` an — SQL Servers Default-Datenbank `master` wird
@@ -119,7 +120,7 @@ ausführen könnte — nicht auf Vorrat.
 - **MCP-State-Dir**: `./state`, in den Container gemountet, Host-User-Owned
   (`.env` setzt `UID`/`GID`) — dateibasierte Upload-Segmente/Artefakte.
 - **DB-Connections** (alle `.d-migrate.yaml`, Tenant `default`): lokales
-  Postgres (`postgres:17.10-trixie`, `127.0.0.1:${PG_PORT:-5433}`) als
+  Postgres (`postgis/postgis:18-3.6`, `127.0.0.1:${PG_PORT:-5433}`) als
   `local_pg`; lokaler SQL Server
   (`mcr.microsoft.com/mssql/server:2022-latest`,
   `127.0.0.1:${MSSQL_PORT:-1433}`, Datenbank `dmigrate`) als

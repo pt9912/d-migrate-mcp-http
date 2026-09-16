@@ -90,7 +90,8 @@ speculatively.
    don't need percent-encoding in the URL. `.env` is gitignored, never
    committed.
 4. `make up` — pulls `ghcr.io/pt9912/d-migrate:1.7.1`,
-   `postgres:17.10-trixie`, `mcr.microsoft.com/mssql/server:2022-latest`,
+   `postgis/postgis:18-3.6` (PostgreSQL 18 + PostGIS 3.6, digest-pinned),
+   `mcr.microsoft.com/mssql/server:2022-latest`,
    `mysql:8.4` and `gvenzl/oracle-free:23-slim-faststart`, starts them,
    waits for them to be healthy, runs a one-shot `mssql-init` step that
    creates the `dmigrate` database (SQL Server's default `master`
@@ -118,7 +119,7 @@ speculatively.
   by the host user (`.env` sets `UID`/`GID`) — holds file-backed upload
   segments and artifact content.
 - **DB connections** (all `.d-migrate.yaml`, tenant `default`): local
-  Postgres (`postgres:17.10-trixie`, `127.0.0.1:${PG_PORT:-5433}`) as
+  Postgres (`postgis/postgis:18-3.6`, `127.0.0.1:${PG_PORT:-5433}`) as
   `local_pg`; local SQL Server
   (`mcr.microsoft.com/mssql/server:2022-latest`,
   `127.0.0.1:${MSSQL_PORT:-1433}`, database `dmigrate`) as `local_mssql`;
