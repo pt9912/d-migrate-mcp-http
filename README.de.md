@@ -159,7 +159,9 @@ make restart   # restart d-migrate-mcp — pick up .d-migrate.yaml / policy-rule
 `make smoke` faehrt einen vollstaendigen Cross-Dialect-Round-Trip gegen den
 laufenden Stack (siehe `scripts/roundtrip-smoke.sh`): `local_pg` wird aus
 einem festen Repro-Schema geseedet (CHECK-Constraints, computed column,
-UNIQUE auf ungebundenem TEXT, FKs mit RESTRICT/NO ACTION, Enum-Typ, View),
+UNIQUE auf ungebundenem TEXT, FKs mit RESTRICT/NO ACTION, Enum-Typ, View,
+dazu eine Typ-Tabelle mit json/jsonb, interval, uuid, xml, bytea, char,
+smallint, real und Arrays sowie nullable PostGIS-Geometrie),
 alle fuenf Connections werden zurueckgelesen, DDL in alle fuenf Dialekte
 generiert, mit den nativen Clients angewendet (sqlcmd/mysql/sqlite3/sqlplus
 — die MCP-Tools kennen kein "DDL anwenden"), wieder zurueckgelesen und
@@ -168,6 +170,11 @@ verglichen. Geprueft werden die versionsgebundene Erwartungsmatrix in
 `schema_generate`, `COMPARE_*` = Finding-Zahl gegen das PG-Reverse) plus die
 versionsunabhaengige Regel, dass kein unveraenderter FK als Compare-Finding
 erscheint.
+
+Der SQLite-Leg laeuft im kleinen Werkzeug-Image `tools/sqlite-spatial`
+(`make sqlite-tool`; sqlite3 + mod_spatialite) — der Host hat keine
+SpatiaLite-Extension, das d-migrate-Runtime-Image keinen sqlite3-CLI. Der
+Smoke baut es bei Bedarf selbst.
 
 Aendert eine neue d-migrate-Version die Zahlen legitim (z. B. hebt der
 upstream-Fix fuer Oracles Skipped-Object-Unterzaehlung

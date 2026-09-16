@@ -1,7 +1,12 @@
 -- Repro-Schema fuer den Round-Trip-Smoke-Test (scripts/roundtrip-smoke.sh),
 -- aus dem Gotchas-Memory nachgebaut: CHECK, computed column, function-Default,
 -- UNIQUE auf TEXT, FK mit RESTRICT / NO ACTION / ohne Angabe, Enum, View.
+-- Dazu eine Typ-Tabelle, die die neutralen Typen ohne Reader-Zweig abdeckt
+-- (json/jsonb, interval, uuid, xml, bytea, char, smallint, real, Arrays) und
+-- zwei Geometriespalten (PostGIS). Geometrie bewusst NULLABLE: SpatiaLite
+-- kann NOT-NULL-Geometrie nicht abbilden (E052 verwirft sonst die Tabelle).
 DROP VIEW IF EXISTS order_summary;
+DROP TABLE IF EXISTS type_probe;
 DROP TABLE IF EXISTS order_items;
 DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS products;
@@ -43,6 +48,23 @@ CREATE TABLE order_items (
   quantity integer NOT NULL CHECK (quantity > 0),
   price_at_sale numeric(10,2) NOT NULL,
   line_total numeric(10,2) GENERATED ALWAYS AS (price_at_sale * quantity) STORED
+);
+
+CREATE TABLE type_probe (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  c_small smallint,
+  c_real real,
+  c_char char(10),
+  c_uuid uuid,
+  c_json json,
+  c_jsonb jsonb,
+  c_xml xml,
+  c_bytea bytea,
+  c_interval interval,
+  c_int_array integer[],
+  c_text_array text[],
+  g_point geometry(Point,4326),
+  g_poly geometry(Polygon,4326)
 );
 
 CREATE VIEW order_summary AS

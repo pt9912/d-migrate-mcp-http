@@ -6,7 +6,10 @@
 # -> DDL nativ anwenden (MSSQL/MySQL/SQLite/Oracle) -> reverse -> schema_compare
 # (PG-Reverse gegen jedes Ziel-Reverse; FK-Assertion + Finding-Zahl).
 #
-# Gebraucht wird: docker (laufender Stack, `make up`), jq, sqlite3, curl.
+# Gebraucht wird: docker (laufender Stack, `make up`), jq, curl.
+# Der SQLite-Leg laeuft im Werkzeug-Image tools/sqlite-spatial (sqlite3 +
+# mod_spatialite; der Host hat keine Spatialite-Extension, das d-migrate-Image
+# keinen sqlite3-CLI) — es wird bei Bedarf automatisch gebaut.
 # Ausgefuehrt:  scripts/roundtrip-smoke.sh [--update-expectations]
 #
 # Die Erwartungsmatrix liegt in scripts/roundtrip-expectations.env und ist an
@@ -27,6 +30,7 @@ cd "$(dirname "$0")/.."
 
 REPRO_DIR=scripts   # Seed: scripts/roundtrip-repro-postgres.sql
 EXPECT_FILE=${EXPECT_FILE:-scripts/roundtrip-expectations.env}   # z.B. EXPECT_FILE=.repro-test/roundtrip-expectations-dev.env für dev-Builds
+SQLITE_TOOL_IMAGE=${SQLITE_TOOL_IMAGE:-dmigrate-sqlite-tool:local}
 UPDATE_EXPECT=false
 [ "${1:-}" = "--update-expectations" ] && UPDATE_EXPECT=true
 
@@ -39,7 +43,10 @@ set -a; set +e; . ./.env 2>/dev/null; set -e; set +a   # UID-Zeile in .env ist r
 
 fail() { echo "FAIL: $*" >&2; FAILED=1; }
 command -v jq >/dev/null || fail "jq nicht installiert"
-command -v sqlite3 >/dev/null || fail "sqlite3 nicht installiert"
+# Werkzeug-Image fuer den SQLite-/SpatiaLite-Leg (einmalig bauen, dann gecacht)
+docker image inspect "$SQLITE_TOOL_IMAGE" >/dev/null 2>&1 \
+  || docker build -q -t "$SQLITE_TOOL_IMAGE" tools/sqlite-spatial >/dev/null 2>&1 \
+  || fail "Werkzeug-Image $SQLITE_TOOL_IMAGE fehlt (make sqlite-tool)"
 
 # ---------------------------------------------------------------- MCP client
 RPC_ID=0
@@ -112,7 +119,7 @@ mcp_call capabilities_list '{}' | jq -r '"   Server: \(.serverName), MCP \(.mcpP
 echo "== 2. local_pg seeden (repro_schema.sql)"
 docker exec d-migrate-postgres sh -c \
   'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q \
-   -c "DROP VIEW IF EXISTS order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers; DROP TYPE IF EXISTS order_status;"'
+   -c "DROP VIEW IF EXISTS order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers, type_probe; DROP TYPE IF EXISTS order_status;"'
 docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -v ON_ERROR_STOP=1 -q < "$REPRO_DIR/roundtrip-repro-postgres.sql"
 echo "   OK"
@@ -128,9 +135,14 @@ SCH_ORACLE=$(reverse_conn local_oracle);echo "   local_oracle -> $SCH_ORACLE"
 # ---------------------------------- 4. schema_generate in 5 Zieldialekte
 echo "== 4. schema_generate (Quelle: local_pg-Reverse) in 5 Dialekte"
 declare -A GEN_STATUS GEN_SKIPPED
+# spatialProfile je Ziel: nur wo es einen Sinn hat (PG=PostGIS-Typen,
+# SQLite=SpatiaLite-Aufrufe). Fuer die anderen wird es weggelassen.
+declare -A SPATIAL_PROFILE=([POSTGRESQL]=postgis [SQLITE]=spatialite)
 for t in POSTGRESQL MSSQL MYSQL SQLITE ORACLE; do
-  res=$(mcp_call schema_generate \
-    "{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_PG\",\"targetDialect\":\"$t\",\"format\":\"yaml\"}")
+  args=$(jq -nc --arg ref "dmigrate://tenants/default/schemas/$SCH_PG" --arg t "$t" \
+    --arg sp "${SPATIAL_PROFILE[$t]:-}" \
+    '{schemaRef:$ref,targetDialect:$t,format:"yaml"} + (if $sp == "" then {} else {spatialProfile:$sp} end)')
+  res=$(mcp_call schema_generate "$args")
   GEN_STATUS[$t]=$(echo "$res" | jq -r '.status')
   GEN_SKIPPED[$t]=$(echo "$res" | jq -r '.skippedCount')
   echo "$res" | jq -r '.ddl' > "$TMP/ddl_$t.sql"
@@ -157,9 +169,25 @@ check_expect GEN_ORACLE_SKIPPED "${GEN_SKIPPED[ORACLE]}"
 
 # ------------------------------------- 5. DDL nativ anwenden (4 Ziele)
 echo "== 5. DDL anwenden (nativ)"
-# SQLite: Datei neu, Host-sqlite3
+# SQLite: Datei neu, Anwendung im Werkzeug-Image (sqlite3 + mod_spatialite,
+# damit AddGeometryColumn/CreateSpatialIndex der SpatiaLite-DDL laufen).
+# InitSpatialMetaData ist Pflicht: die generierte DDL ruft nur
+# AddGeometryColumn auf, das ohne die Metadatentabellen fehlschlaegt.
+# Ausgabe wird geprueft statt verworfen — ein stiller Apply-Fehler waere
+# genau das, was dieser Test finden soll.
 rm -f sqlite-data/local.db
-sqlite3 sqlite-data/local.db < "$TMP/ddl_SQLITE.sql"; echo "   sqlite: OK"
+docker run --rm -i --user "$(id -u):$(id -g)" \
+  -v "$PWD/sqlite-data:/data" -v "$TMP:/ddl:ro" \
+  --entrypoint sqlite3 "$SQLITE_TOOL_IMAGE" \
+  -cmd "PRAGMA trusted_schema=ON;" \
+  -cmd "SELECT load_extension('/usr/lib/x86_64-linux-gnu/mod_spatialite.so');" \
+  -cmd "SELECT InitSpatialMetaData(1);" \
+  /data/local.db < "$TMP/ddl_SQLITE.sql" > "$TMP/sqlite_apply.log" 2>&1
+if grep -qiE '^Error|error:|Parse error|no such' "$TMP/sqlite_apply.log"; then
+  sed -n '1,10p' "$TMP/sqlite_apply.log" >&2
+  fail "sqlite: DDL-Fehler (Log: $TMP/sqlite_apply.log)"
+fi
+echo "   sqlite: OK"
 # MySQL: Datenbank neu anlegen
 docker exec d-migrate-mysql sh -c \
   'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS dmigrate; CREATE DATABASE dmigrate;"' 2>/dev/null
@@ -168,7 +196,7 @@ docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmig
 # MSSQL: Tabellen/View droppen, dann apply
 docker exec d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
   -P "$MSSQL_SA_PASSWORD" -d dmigrate -Q \
-  "IF OBJECT_ID('order_summary','V') IS NOT NULL DROP VIEW order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers;" \
+  "IF OBJECT_ID('order_summary','V') IS NOT NULL DROP VIEW order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers, type_probe;" \
   > /dev/null
 docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
   -P "$MSSQL_SA_PASSWORD" -d dmigrate \
@@ -180,7 +208,7 @@ echo "   mssql: OK"
 # in user_objects kleingeschrieben ('customers') — deshalb UPPER()-Vergleich.
 docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
   >/dev/null <<'EOF'
-BEGIN FOR o IN (SELECT object_name, object_type FROM user_objects WHERE UPPER(object_name) IN ('ORDER_SUMMARY','ORDER_ITEMS','ORDERS','PRODUCTS','CUSTOMERS') ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"'; END LOOP; END;
+BEGIN FOR o IN (SELECT object_name, object_type FROM user_objects WHERE UPPER(object_name) IN ('ORDER_SUMMARY','ORDER_ITEMS','ORDERS','PRODUCTS','CUSTOMERS','TYPE_PROBE') ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"'; END LOOP; END;
 /
 EOF
 sed 's/;;/;/g' "$TMP/ddl_ORACLE.sql" > "$TMP/ddl_ORACLE_norm.sql"
