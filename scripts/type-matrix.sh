@@ -27,7 +27,12 @@ MCP_URL=http://127.0.0.1:8787/mcp
 PROTOCOL=2025-11-25
 HARNESS_TOOL_IMAGE=${HARNESS_TOOL_IMAGE:-dmigrate-harness-tools:local}
 PYTHON_IMAGE=${PYTHON_IMAGE:-dmigrate-harness-python:local}   # Stage 'py' aus tools/harness-tools
-TMP=$(mktemp -d)
+# Temp-Verzeichnis UNTER dem Projekt, nicht in $TMPDIR: auf macOS/Colima ist
+# /var/folders nicht in den Container gemountet — der Container saehe ein
+# leeres Verzeichnis und die Checks wuerden still "0" melden.
+TMP_ROOT="$PWD/.repro-test/tmp"
+mkdir -p "$TMP_ROOT"
+TMP=$(mktemp -d "$TMP_ROOT/run-XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
 set -a; set +e; . ./.env 2>/dev/null; set -e; set +a
@@ -77,8 +82,14 @@ SQL
 }
 seed_sqlite() {
   rm -f sqlite-data/local.db
+  # Kein `|| true`: ein fehlgeschlagener Seed (z.B. weil mod_spatialite nicht
+  # ladbar ist) muss den Lauf scheitern lassen, nicht eine leere Datei
+  # hinterlassen — sonst meldet die Matrix spaeter "?"/"0" statt Fehler.
   docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD/sqlite-data:/data" -v "$PWD/scripts/types:/seed:ro" \
-    --entrypoint sqlite3 "$HARNESS_TOOL_IMAGE" /data/local.db < scripts/types/sqlite.sql >/dev/null || true
+    --entrypoint sqlite3 "$HARNESS_TOOL_IMAGE" /data/local.db < scripts/types/sqlite.sql > "$TMP/seed_sqlite.log" 2>&1 \
+    || { sed -n '1,5p' "$TMP/seed_sqlite.log" >&2; return 1; }
+  grep -qiE '^Error|error:|Parse error|no such' "$TMP/seed_sqlite.log" && { sed -n '1,5p' "$TMP/seed_sqlite.log" >&2; return 1; }
+  return 0
 }
 seed_of() { case "$1" in PG) seed_pg;; MSSQL) seed_mssql;; MYSQL) seed_mysql;; SQLITE) seed_sqlite;; ORACLE) seed_oracle;; esac; }
 
@@ -195,17 +206,30 @@ SQL
 }
 silent_losses_of() {  # $1=Dialekt $2=schemaId -> stdout: "spalte|quelltyp|neutraltyp"
   [ "$1" = "SQLITE" ] && return 0
-  local nat="$TMP/native_$1.txt" art
-  "native_types_$(echo "$1" | tr 'A-Z' 'a-z')" > "$nat" 2>/dev/null || true
+  local nat="$TMP/native_$1.txt" art out rc=0
+  # Kein stilles Verschlucken: jede Stufe meldet ihren Fehler und die Zelle
+  # erscheint als CHECK-FEHLER statt als "0" (eine Pruefung, die bei einem
+  # Ausfuehrungsfehler Entwarnung gibt, ist schlimmer als keine Pruefung).
+  if ! "native_types_$(echo "$1" | tr 'A-Z' 'a-z')" > "$nat" 2>"$TMP/native_$1.err"; then
+    fail "Quellkatalog-Abfrage $1 fehlgeschlagen: $(head -c 160 "$TMP/native_$1.err" | tr '\n' ' ')"
+    echo "CHECK-FEHLER|$1|katalog"; return 0
+  fi
   art=$(artifact_of_schema "$2")
-  [ -n "$art" ] || return 0
-  mcp_call artifact_chunk_get "{\"artifactId\":\"$art\"}" 2>/dev/null | jq -r '.text' > "$TMP/neutral_$1.yaml" || return 0
+  [ -n "$art" ] || { fail "kein Artefakt zum Schema $2 ($1)"; echo "CHECK-FEHLER|$1|artefakt"; return 0; }
+  if ! mcp_call artifact_chunk_get "{\"artifactId\":\"$art\"}" 2>/dev/null | jq -r '.text' > "$TMP/neutral_$1.yaml"; then
+    fail "Reverse-Artefakt $1 nicht lesbar"; echo "CHECK-FEHLER|$1|artefakt"; return 0
+  fi
   # im Python-Image ausfuehren (Stage 'py' unseres Dockerfiles): weder Host
   # noch d-migrate-Image bringen python3 mit. Mount-Ziel NICHT /lib nennen —
   # das ueberschreibt das Loader-Verzeichnis und python3 startet nicht.
-  docker run --rm -v "$TMP:/in:ro" -v "$PWD/scripts/lib:/harness-lib:ro" \
+  out=$(docker run --rm -v "$TMP:/in:ro" -v "$PWD/scripts/lib:/harness-lib:ro" \
     --entrypoint python3 "$PYTHON_IMAGE" /harness-lib/silent-loss-check.py \
-    "/in/native_$1.txt" "/in/neutral_$1.yaml" 2>/dev/null || true
+    "/in/native_$1.txt" "/in/neutral_$1.yaml" 2>&1) || rc=$?
+  if [ "$rc" != 0 ]; then
+    fail "Silent-Loss-Check $1 fehlgeschlagen (rc=$rc): $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+    echo "CHECK-FEHLER|$1|python"; return 0
+  fi
+  printf '%s\n' "$out" | grep . || true
 }
 
 # ---------------------------------------------------------------------- Matrix
@@ -299,7 +323,9 @@ for src in $DIALECTS; do
     printf '  %-7s (ausgenommen: deklarierte SQLite-Typen sind nominal)\n' "$src"
     continue
   fi
-  if [ -n "${SILENT[$src]:-}" ]; then
+  if printf '%s' "${SILENT[$src]:-}" | grep -q CHECK-FEHLER; then
+    printf '  %-7s CHECK-FEHLER: %s\n' "$src" "$(printf '%s' "${SILENT[$src]}" | tr '\n' ' ')"
+  elif [ -n "${SILENT[$src]:-}" ]; then
     n=$(printf '%s\n' "${SILENT[$src]}" | grep -c .)
     printf '  %-7s %d:\n' "$src" "$n"
     printf '%s\n' "${SILENT[$src]}" | grep . | sed 's/^/      /'

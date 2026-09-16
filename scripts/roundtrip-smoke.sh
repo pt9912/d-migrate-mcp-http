@@ -36,7 +36,12 @@ UPDATE_EXPECT=false
 
 MCP_URL=http://127.0.0.1:8787/mcp
 PROTOCOL=2025-11-25
-TMP=$(mktemp -d)
+# Temp-Verzeichnis UNTER dem Projekt, nicht in $TMPDIR: auf macOS/Colima ist
+# /var/folders nicht in den Container gemountet — der Container saehe ein
+# leeres Verzeichnis und die Checks wuerden still "0" melden.
+TMP_ROOT="$PWD/.repro-test/tmp"
+mkdir -p "$TMP_ROOT"
+TMP=$(mktemp -d "$TMP_ROOT/run-XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
 set -a; set +e; . ./.env 2>/dev/null; set -e; set +a   # UID-Zeile in .env ist readonly — Fehler ignorieren, Rest laden

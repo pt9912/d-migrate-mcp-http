@@ -40,7 +40,9 @@ await_job() {
     st=$(echo "$res" | jq -r '.status')
     case "$st" in
       SUCCEEDED) echo "$res"; return 0 ;;
-      FAILED|CANCELLED) fail "Job $1 endete: $st"; return 1 ;;
+      FAILED|CANCELLED)
+        fail "Job $1 endete: $st — $(echo "$res" | jq -r '.error.message // .error.code // "ohne Fehlerangabe"' 2>/dev/null)"
+        return 1 ;;
     esac
     sleep 2
   done
