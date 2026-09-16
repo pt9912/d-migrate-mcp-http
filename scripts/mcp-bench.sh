@@ -24,7 +24,20 @@ N_GEN=${N_GEN:-10}          # pro Dialekt
 RESTART=false
 [ "${1:-}" = "--restart" ] && { RESTART=true; shift; }
 SMOKE_SCHEMA_REF=${1:-}
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Temp-Verzeichnis UNTER dem Projekt (auf macOS/Colima ist $TMPDIR nicht in
+# Container gemountet) und im Fehlerfall stehen lassen — dann sind Logs/Dateien
+# noch da, wenn man sie braucht.
+TMP_ROOT="$PWD/.repro-test/tmp"
+mkdir -p "$TMP_ROOT"
+TMP=$(mktemp -d "$TMP_ROOT/run-XXXXXX")
+cleanup() {
+  if [ "${1:-0}" != 0 ]; then
+    echo "== Lauf fehlgeschlagen — Temp bleibt liegen: $TMP" >&2
+  else
+    rm -rf "$TMP"
+  fi
+}
+trap 'cleanup $?' EXIT
 
 set -a; set +e; . ./.env 2>/dev/null; set -e; set +a
 

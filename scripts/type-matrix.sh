@@ -35,7 +35,16 @@ PYTHON_IMAGE=${PYTHON_IMAGE:-dmigrate-harness-python:local}   # Stage 'py' aus t
 TMP_ROOT="$PWD/.repro-test/tmp"
 mkdir -p "$TMP_ROOT"
 TMP=$(mktemp -d "$TMP_ROOT/run-XXXXXX")
-trap 'rm -rf "$TMP"' EXIT
+# Temp-Verzeichnis nur bei ERFOLG loeschen: im Fehlerfall sind die Logs darin
+# genau das, was man braucht (die Fehlermeldungen verweisen auf diese Pfade).
+cleanup() {
+  if [ "${1:-0}" != 0 ]; then
+    echo "== Lauf fehlgeschlagen — Logs/Temp bleiben liegen: $TMP" >&2
+  else
+    rm -rf "$TMP"
+  fi
+}
+trap 'cleanup $?' EXIT
 
 set -a; set +e; . ./.env 2>/dev/null; set -e; set +a
 
