@@ -186,6 +186,27 @@ make smoke                                  # Lauf gegen Erwartungen
 make smoke UPDATE=--update-expectations     # nach gepruefter Aenderung neu pinnen
 ```
 
+## Typ-Matrix
+
+`make type-matrix` ist eine eigene, breitere Sonde: jeder Dialekt bekommt ein
+Seed mit seinen *nativen* Typen (`scripts/types/*.sql` — inklusive
+Dialekt-Eigenheiten wie `sql_variant`, `rowversion`, `money`,
+`year`/`set`/`enum`, `XMLTYPE`, `ROWID`, `SDO_GEOMETRY`,
+SpatiaLite-Geometrien); dieses Schema wird zurueckgelesen, in alle vier
+anderen Dialekte generiert, dort angewendet, wieder zurueckgelesen und
+verglichen. Ausgabe ist eine 5x5-Finding-Matrix plus die Finding-Codes je
+Zelle — das systematische Gegenstueck zum festen Repro des Smoke.
+
+Sie leert waehrend des Laufs die vier Testdatenbanken (ein Reverse traegt die
+ganze Schemaflaeche, Reste wuerden beim Anwenden kollidieren) und laesst sie
+leer; der naechste `make smoke` baut alles neu auf. Die SQLite-Legs laufen im
+selben Werkzeug-Image wie der Smoke.
+
+```bash
+make type-matrix                # 5x5-Lauf, raeumt danach auf
+make type-matrix KEEP=--keep    # angewendete Tabellen stehen lassen
+```
+
 Ein Latenz-Benchmark gegen den MCP-Server liegt in
 `scripts/mcp-bench.sh` (`--restart` misst zusaetzlich den Kaltstart;
 nuetzlich zum Vergleichen von JVM- und Native-Image).

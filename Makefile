@@ -3,7 +3,7 @@ SQLITE_TOOL_IMAGE ?= dmigrate-sqlite-tool:local
 
 -include .env
 
-.PHONY: up down down-v logs restart smoke sqlite-tool
+.PHONY: up down down-v logs restart smoke sqlite-tool type-matrix
 
 up:
 	$(DOCKER_COMPOSE) up -d
@@ -27,3 +27,6 @@ sqlite-tool:
 
 smoke:
 	bash scripts/roundtrip-smoke.sh $(UPDATE)
+
+type-matrix:
+	bash scripts/type-matrix.sh $(KEEP)

@@ -12,6 +12,7 @@ RUN apt-get update \
       libsqlite3-mod-spatialite \
  && rm -rf /var/lib/apt/lists/*
 
-# Pfad der Extension, damit Aufrufer ihn nicht raten muessen:
-#   /usr/lib/x86_64-linux-gnu/mod_spatialite.so
+# Aufruf in den Skripten bewusst pfadlos (`SELECT load_extension('mod_spatialite')`):
+# SQLite ergaenzt die Plattform-Endung, der Rest laeuft ueber den System-Cache —
+# damit ist es nicht an x86_64-Linux gebunden (arm64/macOS-Docker laufen mit).
 WORKDIR /work

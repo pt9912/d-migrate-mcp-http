@@ -176,13 +176,17 @@ echo "== 5. DDL anwenden (nativ)"
 # Ausgabe wird geprueft statt verworfen — ein stiller Apply-Fehler waere
 # genau das, was dieser Test finden soll.
 rm -f sqlite-data/local.db
-docker run --rm -i --user "$(id -u):$(id -g)" \
+# if ! ... : sqlite3 endet bei SQL-Fehlern != 0 — unter `set -e` wuerde der
+# Lauf sonst hier abbrechen, statt den Fehler unten zu melden.
+if ! docker run --rm -i --user "$(id -u):$(id -g)" \
   -v "$PWD/sqlite-data:/data" -v "$TMP:/ddl:ro" \
   --entrypoint sqlite3 "$SQLITE_TOOL_IMAGE" \
   -cmd "PRAGMA trusted_schema=ON;" \
-  -cmd "SELECT load_extension('/usr/lib/x86_64-linux-gnu/mod_spatialite.so');" \
+  -cmd "SELECT load_extension('mod_spatialite');" \
   -cmd "SELECT InitSpatialMetaData(1);" \
-  /data/local.db < "$TMP/ddl_SQLITE.sql" > "$TMP/sqlite_apply.log" 2>&1
+  /data/local.db < "$TMP/ddl_SQLITE.sql" > "$TMP/sqlite_apply.log" 2>&1; then
+  :
+fi
 if grep -qiE '^Error|error:|Parse error|no such' "$TMP/sqlite_apply.log"; then
   sed -n '1,10p' "$TMP/sqlite_apply.log" >&2
   fail "sqlite: DDL-Fehler (Log: $TMP/sqlite_apply.log)"

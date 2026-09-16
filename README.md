@@ -182,6 +182,26 @@ make smoke                          # run, compare against expectations
 make smoke UPDATE=--update-expectations   # re-pin after reviewed changes
 ```
 
+## Type matrix
+
+`make type-matrix` is a separate, wider probe: each dialect gets a seed with
+its *native* types (`scripts/types/*.sql` — including dialect quirks such as
+`sql_variant`, `rowversion`, `money`, `year`/`set`/`enum`, `XMLTYPE`,
+`ROWID`, `SDO_GEOMETRY`, SpatiaLite geometries), that schema is reversed and
+generated into all four other dialects, applied there, re-reversed and
+compared. The output is a 5×5 finding matrix plus the finding codes per
+cell — the systematic counterpart to the smoke's fixed repro.
+
+It empties the four test databases while it runs (a reverse carries the
+whole schema surface, so leftovers would collide on apply) and leaves them
+empty; the next `make smoke` rebuilds everything. The SQLite legs run in the
+same helper image as the smoke.
+
+```bash
+make type-matrix          # 5x5 run, cleans up afterwards
+make type-matrix KEEP=--keep   # leave the applied tables in place
+```
+
 A latency benchmark against the MCP server lives in
 `scripts/mcp-bench.sh` (`--restart` also measures cold start; useful when
 comparing the JVM and native images).

@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# Typ-Matrix: 5x5 ueber alle Dialekte.
+#
+# Fuer jeden Dialekt wird ein natives Typ-Schema geseedet (scripts/types/),
+# per schema_reverse exportiert, in alle vier anderen Dialekte generiert,
+# dort angewendet, wieder zurueckgelesen und gegen das Quell-Reverse
+# verglichen. Ausgabe ist eine Matrix (Findings je Zelle) plus eine
+# Code-Uebersicht — gedacht als flaechendeckende Sonde fuer Typverluste
+# (still degradiert vs. gemeldet) und als reproduzierbarer Beleg fuer
+# Befunde an d-migrate.
+#
+# Aufruf:  scripts/type-matrix.sh [--keep]      (--keep laesst die Tabellen stehen)
+# Gebraucht: laufender Stack (make up), jq, curl, docker; SQLite-Legs laufen
+# im Werkzeug-Image tools/sqlite-spatial (wird bei Bedarf gebaut).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSION%%.*}" -lt 4 ]; then
+  echo "FAIL: bash >= 4 noetig. Gefunden: ${BASH_VERSION:-nicht bash}" >&2
+  exit 1
+fi
+
+KEEP=false
+[ "${1:-}" = "--keep" ] && KEEP=true
+
+MCP_URL=http://127.0.0.1:8787/mcp
+PROTOCOL=2025-11-25
+SQLITE_TOOL_IMAGE=${SQLITE_TOOL_IMAGE:-dmigrate-sqlite-tool:local}
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+set -a; set +e; . ./.env 2>/dev/null; set -e; set +a
+
+FAILED=0
+fail() { echo "FAIL: $*" >&2; FAILED=1; }
+
+command -v jq >/dev/null || { echo "FAIL: jq fehlt" >&2; exit 1; }
+docker image inspect "$SQLITE_TOOL_IMAGE" >/dev/null 2>&1 \
+  || docker build -q -t "$SQLITE_TOOL_IMAGE" tools/sqlite-spatial >/dev/null
+
+RPC_ID=0
+. scripts/lib/mcp-client.sh
+mcp_session || exit 1
+
+DIALECTS="PG MSSQL MYSQL SQLITE ORACLE"
+conn_of() { case "$1" in PG) echo local_pg;; MSSQL) echo local_mssql;; MYSQL) echo local_mysql;; SQLITE) echo local_sqlite;; ORACLE) echo local_oracle;; esac; }
+# spatialProfile nur wo sinnvoll (PG=PostGIS, SQLite=SpatiaLite)
+profile_of() { case "$1" in PG) echo postgis;; SQLITE) echo spatialite;; *) echo "";; esac; }
+# Kurzlabel -> Dialektname der API (PG heisst dort POSTGRESQL)
+api_of() { case "$1" in PG) echo POSTGRESQL;; *) echo "$1";; esac; }
+
+# ---------------------------------------------------------------- Seed je Dialekt
+seed_pg() {
+  docker exec -i d-migrate-postgres sh -c \
+    'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q -c "DROP TABLE IF EXISTS type_matrix; DROP TYPE IF EXISTS mood;"'
+  docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -q < scripts/types/pg.sql
+}
+seed_mssql() {
+  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
+    -P "$MSSQL_SA_PASSWORD" -d dmigrate -i /dev/stdin < scripts/types/mssql.sql >/dev/null
+}
+seed_mysql() {
+  docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' 2>/dev/null < scripts/types/mysql.sql
+}
+seed_oracle() {
+  docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
+    < <(sed 's/;;/;/g' scripts/types/oracle.sql) >/dev/null
+  # Metadaten fuer einen spaeteren Spatial-Index sind hier nicht noetig; nur aufraeumen:
+  docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
+    <<'SQL' >/dev/null
+DELETE FROM USER_SDO_GEOM_METADATA WHERE TABLE_NAME='type_matrix';
+COMMIT;
+SQL
+}
+seed_sqlite() {
+  rm -f sqlite-data/local.db
+  docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD/sqlite-data:/data" -v "$PWD/scripts/types:/seed:ro" \
+    --entrypoint sqlite3 "$SQLITE_TOOL_IMAGE" /data/local.db < scripts/types/sqlite.sql >/dev/null || true
+}
+seed_of() { case "$1" in PG) seed_pg;; MSSQL) seed_mssql;; MYSQL) seed_mysql;; SQLITE) seed_sqlite;; ORACLE) seed_oracle;; esac; }
+
+# --------------------------------------------------------------- Apply je Dialekt
+# $1=Dialekt $2=DDL-Datei; Rueckgabe != 0 bei Fehler
+apply_pg() {
+  docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -q < "$2" > "$TMP/apply_$1.log" 2>&1
+}
+apply_mssql() {
+  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
+    -P "$MSSQL_SA_PASSWORD" -d dmigrate < "$2" > "$TMP/apply_$1.log" 2>&1
+  ! grep -qE 'Msg [0-9]+, Level 1[5-9]' "$TMP/apply_$1.log"
+}
+apply_mysql() {
+  docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' 2> "$TMP/apply_$1.log" < "$2"
+  ! grep -qiE '^ERROR' "$TMP/apply_$1.log"
+}
+apply_oracle() {
+  sed 's/;;/;/g' "$2" > "$TMP/ddl_ora_norm.sql"
+  docker cp "$TMP/ddl_ora_norm.sql" d-migrate-oracle:/tmp/matrix_ddl.sql >/dev/null
+  docker exec d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
+    @/tmp/matrix_ddl.sql > "$TMP/apply_$1.log" 2>&1
+  ! grep -qE '^(ORA-|SP2-|ERROR at)' "$TMP/apply_$1.log"
+}
+apply_sqlite() {
+  docker run --rm -i --user "$(id -u):$(id -g)" \
+    -v "$PWD/sqlite-data:/data" -v "$(dirname "$2"):/ddl:ro" \
+    --entrypoint sqlite3 "$SQLITE_TOOL_IMAGE" \
+    -cmd "PRAGMA trusted_schema=ON;" \
+    -cmd "SELECT load_extension('mod_spatialite');" \
+    -cmd "SELECT InitSpatialMetaData(1);" \
+    /data/local.db < "$2" > "$TMP/apply_$1.log" 2>&1
+  ! grep -qiE '^Error|error:|Parse error|no such' "$TMP/apply_$1.log"
+}
+apply_of() { local d="$1" f="$2"; case "$d" in PG) apply_pg "$d" "$f";; MSSQL) apply_mssql "$d" "$f";; MYSQL) apply_mysql "$d" "$f";; SQLITE) apply_sqlite "$d" "$f";; ORACLE) apply_oracle "$d" "$f";; esac; }
+
+# --------------------------------------------------------------- Cleanup je Dialekt
+# Die Matrix LEERT die Testdatenbanken (statt zu filtern): schema_reverse_start
+# ignoriert includes/excludes nachweislich, ein Reverse traegt also die ganze
+# Schemaflaeche — und ein Apply wuerde mit liegengebliebenen Tabellen
+# kollidieren. PG behaelt das PostGIS-Schema (eigene Extension-Schemas sind
+# nicht Teil von public); dmigrate_state liegt ebenfalls ausserhalb.
+clean_pg() {
+  docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q \
+    -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;" 2>/dev/null || true
+}
+clean_mssql() {
+  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
+    -P "$MSSQL_SA_PASSWORD" -d dmigrate -Q "
+      DECLARE @s NVARCHAR(MAX) = N'';
+      SELECT @s = @s + N'DROP ' + CASE WHEN type='V' THEN 'VIEW' ELSE 'TABLE' END + N' [' + name + N'];'
+        FROM sys.objects WHERE type IN ('U','V') AND is_ms_shipped = 0;
+      EXEC sp_executesql @s;" >/dev/null 2>&1 || true
+}
+clean_mysql() {
+  docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS dmigrate; CREATE DATABASE dmigrate;"' 2>/dev/null || true
+}
+clean_oracle() {
+  docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 >/dev/null 2>&1 <<'SQL' || true
+BEGIN
+  FOR o IN (SELECT object_name, object_type FROM user_objects
+             WHERE object_type IN ('TABLE','VIEW') AND object_name NOT LIKE 'SYS_%'
+             ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP
+    EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"' ||
+      CASE WHEN o.object_type = 'TABLE' THEN ' PURGE' ELSE '' END;
+  END LOOP;
+END;
+/
+DELETE FROM USER_SDO_GEOM_METADATA;
+COMMIT;
+SQL
+}
+clean_sqlite() { rm -f sqlite-data/local.db; }
+clean_of() { case "$1" in PG) clean_pg;; MSSQL) clean_mssql;; MYSQL) clean_mysql;; SQLITE) clean_sqlite;; ORACLE) clean_oracle;; esac; }
+
+# ---------------------------------------------------------------------- Matrix
+echo "== Typ-Matrix (Quelle -> Ziel: Findings des Compare Quelle<->Ziel)"
+declare -A CELL CODES
+echo "-- Testdatenbanken leeren"
+for d in $DIALECTS; do clean_of "$d"; done
+for src in $DIALECTS; do
+  echo "-- Quelle $src: seeden + reverse"
+  if ! seed_of "$src" > "$TMP/seed_$src.log" 2>&1; then
+    echo "   Seed $src fehlgeschlagen (Log: $TMP/seed_$src.log)"; continue
+  fi
+  SCH_SRC=$(reverse_conn "$(conn_of "$src")") || { echo "   Reverse $src fehlgeschlagen"; continue; }
+  for dst in $DIALECTS; do
+    [ "$src" = "$dst" ] && continue
+    prof=$(profile_of "$dst")
+    args=$(jq -nc --arg ref "dmigrate://tenants/default/schemas/$SCH_SRC" --arg t "$(api_of "$dst")" --arg sp "$prof" \
+      '{schemaRef:$ref,targetDialect:$t,format:"yaml"} + (if $sp=="" then {} else {spatialProfile:$sp} end)')
+    if ! res=$(mcp_call schema_generate "$args" 2>/dev/null); then
+      CELL[$src,$dst]="GEN-FAIL"; continue
+    fi
+    if ! echo "$res" | jq -e '.ddl' > /dev/null 2>&1; then
+      # Fehler-Payload statt DDL (z.B. VALIDATION_ERROR/INTERNAL_AGENT_ERROR)
+      mkdir -p .repro-test/matrix-fail
+      echo "$res" > ".repro-test/matrix-fail/gen_${src}_${dst}.json"
+      CELL[$src,$dst]="GEN-ERR"
+      echo "   GEN-ERR $src->$dst: $(echo "$res" | jq -r '.code // "?"' 2>/dev/null) $(echo "$res" | jq -r '.message // ""' 2>/dev/null | head -c 120)"
+      continue
+    fi
+    echo "$res" | jq -r '.ddl' > "$TMP/ddl_${src}_${dst}.sql"
+    clean_of "$dst"
+    if ! apply_of "$dst" "$TMP/ddl_${src}_${dst}.sql"; then
+      CELL[$src,$dst]="APPLY-FAIL"
+      mkdir -p .repro-test/matrix-fail
+      cp "$TMP/ddl_${src}_${dst}.sql" ".repro-test/matrix-fail/ddl_${src}_${dst}.sql" 2>/dev/null || true
+      cp "$TMP/apply_$dst.log" ".repro-test/matrix-fail/apply_${src}_${dst}.log" 2>/dev/null || true
+      echo "   APPLY-FAIL $src->$dst: $(grep -m1 -E 'Msg [0-9]+, Level|^ORA-|^ERROR|^Error' "$TMP/apply_$dst.log" 2>/dev/null | head -1) (DDL: .repro-test/matrix-fail/)"
+      continue
+    fi
+    SCH_DST=$(reverse_conn "$(conn_of "$dst")") || { CELL[$src,$dst]="REV-FAIL"; continue; }
+    cmp=$(mcp_call schema_compare "{\"left\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_SRC\"},\"right\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_DST\"},\"format\":\"yaml\"}" 2>/dev/null) || { CELL[$src,$dst]="CMP-FAIL"; continue; }
+    n=$(echo "$cmp" | jq '.findings | length')
+    CELL[$src,$dst]=$n
+    codes=$(echo "$cmp" | jq -r '[.findings[] | select(.code!="SCHEMA_NAME_CHANGED") | .code] | group_by(.) | map("\(.[0]):\(length)") | join(" ")')
+    CODES[$src,$dst]="$codes"
+  done
+  clean_of "$src"
+done
+
+echo
+printf '%-8s' "Quelle"; for d in $DIALECTS; do printf '%-14s' "$d"; done; echo
+for src in $DIALECTS; do
+  printf '%-8s' "$src"
+  for dst in $DIALECTS; do
+    [ "$src" = "$dst" ] && { printf '%-14s' "-"; continue; }
+    printf '%-14s' "${CELL[$src,$dst]:-?}"
+  done
+  echo
+done
+
+echo
+echo "== Finding-Codes je Zelle (ohne SCHEMA_NAME_CHANGED)"
+for src in $DIALECTS; do
+  for dst in $DIALECTS; do
+    [ "$src" = "$dst" ] && continue
+    [ -n "${CODES[$src,$dst]:-}" ] && printf '  %-7s -> %-7s %s\n' "$src" "$dst" "${CODES[$src,$dst]}"
+  done
+done
+
+if [ "$KEEP" = false ]; then
+  for d in $DIALECTS; do clean_of "$d"; done
+  echo "(Tabellen aufgeraeumt; --keep laesst sie stehen)"
+fi
+[ "$FAILED" = 0 ] || exit 1
