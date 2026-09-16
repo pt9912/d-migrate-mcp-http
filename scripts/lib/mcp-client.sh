@@ -69,3 +69,13 @@ reverse_conn() {
     '.schemas[] | select(.artifactRef==$a) | .schemaId' \
     || { fail "kein schemaId zu Artefakt $art gefunden"; return 1; }
 }
+
+# Leert die SQLite-Datei IM Container statt auf dem Host: bei einem Bind-Mount
+# mit laufendem Container-Handle (macOS/Colima, virtiofs) kann ein host-seitiges
+# rm -f scheitern oder mit dem Schreiber kollidieren. Erwartet
+# HARNESS_TOOL_IMAGE und "$PWD/sqlite-data".
+sqlite_reset() {
+  docker run --rm -v "$PWD/sqlite-data:/data" --entrypoint sh "$HARNESS_TOOL_IMAGE" \
+    -c 'rm -f /data/local.db' >/dev/null 2>&1 \
+    || { fail "sqlite-data/local.db konnte nicht geleert werden (Container)"; return 1; }
+}

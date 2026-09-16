@@ -105,7 +105,7 @@ COMMIT;
 SQL
 }
 seed_sqlite() {
-  rm -f sqlite-data/local.db
+  sqlite_reset
   # Kein `|| true`: ein fehlgeschlagener Seed (z.B. weil mod_spatialite nicht
   # ladbar ist) muss den Lauf scheitern lassen, nicht eine leere Datei
   # hinterlassen — sonst meldet die Matrix spaeter "?"/"0" statt Fehler.
@@ -225,7 +225,7 @@ DELETE FROM USER_SDO_GEOM_METADATA;
 COMMIT;
 SQL
 }
-clean_sqlite() { rm -f sqlite-data/local.db; }
+clean_sqlite() { sqlite_reset; }
 clean_of() { case "$1" in PG) clean_pg;; MSSQL) clean_mssql;; MYSQL) clean_mysql;; SQLITE) clean_sqlite;; ORACLE) clean_oracle;; esac; }
 
 # ------------------------------------------- Stille Typverluste (zweite Achse)

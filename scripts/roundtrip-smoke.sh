@@ -142,13 +142,13 @@ check_expect GEN_ORACLE_SKIPPED "${GEN_SKIPPED[ORACLE]}"
 
 # ------------------------------------- 5. DDL nativ anwenden (4 Ziele)
 echo "== 5. DDL anwenden (nativ)"
-# SQLite: Datei neu, Anwendung im Werkzeug-Image (sqlite3 + mod_spatialite,
+# SQLite: Datei neu (im Container geleert), Anwendung im Werkzeug-Image (sqlite3 + mod_spatialite,
 # damit AddGeometryColumn/CreateSpatialIndex der SpatiaLite-DDL laufen).
 # InitSpatialMetaData ist Pflicht: die generierte DDL ruft nur
 # AddGeometryColumn auf, das ohne die Metadatentabellen fehlschlaegt.
 # Ausgabe wird geprueft statt verworfen — ein stiller Apply-Fehler waere
 # genau das, was dieser Test finden soll.
-rm -f sqlite-data/local.db
+sqlite_reset
 # if ! ... : sqlite3 endet bei SQL-Fehlern != 0 — unter `set -e` wuerde der
 # Lauf sonst hier abbrechen, statt den Fehler unten zu melden.
 SQLITE_APPLY_RC=0
