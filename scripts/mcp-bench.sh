@@ -9,6 +9,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Bash >= 4 noetig (set -o pipefail-Verhalten, ${var^^}-freie Syntax ok, aber
+# die Skripte im Repo setzen bash 4 voraus — hier einheitlich geprueft).
+if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSION%%.*}" -lt 4 ]; then
+  echo "FAIL: bash >= 4 noetig. Gefunden: ${BASH_VERSION:-nicht bash}" >&2
+  exit 1
+fi
+
 PROTOCOL=2025-11-25
 MCP_URL=http://127.0.0.1:8787/mcp
 N_FAST=${N_FAST:-40}
