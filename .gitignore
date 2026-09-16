@@ -3,3 +3,5 @@ sqlite-data/*
 !sqlite-data/.gitkeep
 .env
 .repro-test/
+__pycache__/
+*.pyc
