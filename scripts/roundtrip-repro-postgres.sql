@@ -1,6 +1,6 @@
--- Repro-Schema fuer d-migrate v1.7.0 Smoke-Test (aus dem Gotchas-Memory
--- nachgebaut): CHECK, computed column, function-Default, UNIQUE auf TEXT,
--- FK mit RESTRICT / NO ACTION / ohne Angabe, Enum, View.
+-- Repro-Schema fuer den Round-Trip-Smoke-Test (scripts/roundtrip-smoke.sh),
+-- aus dem Gotchas-Memory nachgebaut: CHECK, computed column, function-Default,
+-- UNIQUE auf TEXT, FK mit RESTRICT / NO ACTION / ohne Angabe, Enum, View.
 DROP VIEW IF EXISTS order_summary;
 DROP TABLE IF EXISTS order_items;
 DROP TABLE IF EXISTS orders;
