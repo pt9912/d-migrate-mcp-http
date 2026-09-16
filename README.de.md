@@ -6,8 +6,8 @@
 
 Ein lokales Docker-Compose-Setup, das den
 [d-migrate](https://github.com/pt9912/d-migrate)-MCP-Server (HTTP-Transport)
-gegen echte Postgres-, SQL-Server-, MySQL- und SQLite/SpatiaLite-Test-
-datenbanken betreibt — d-migrates vier unterstützte Dialekte — und
+gegen echte Postgres-, SQL-Server-, MySQL-, Oracle- und SQLite/SpatiaLite-Test-
+datenbanken betreibt — d-migrates fünf unterstützte Dialekte — und
 project-scoped in Claude Code registriert (`.mcp.json`). Für alle, die
 d-migrates
 Schema-/Daten-Tools als MCP-Tools aus einer Claude-Code-Session heraus
@@ -48,8 +48,8 @@ Nicht-Loopback-Betrieb gebraucht wird.
 
 So wenig Konfiguration wie möglich, aber genug, um echte DB-Tools nutzbar
 zu machen: jede zusätzliche Datei oder jeder zusätzliche Service
-(`.d-migrate.yaml`, `policy-rules.yaml`, die Postgres-/SQL-Server-/
-MySQL-Container) existiert nur, weil ein konkretes Tool sie sonst nicht
+(`.d-migrate.yaml`, `policy-rules.yaml`, die Postgres-/SQL-Server-/MySQL-/
+Oracle-Container) existiert nur, weil ein konkretes Tool sie sonst nicht
 ausführen könnte — nicht auf Vorrat.
 
 ## Was macht es vertrauenswürdig?
@@ -71,7 +71,7 @@ ausführen könnte — nicht auf Vorrat.
 ---
 
 - **Host-Voraussetzungen:** `docker` (mit Compose v2), `jq`, `curl` und
-  **bash ≥ 4** (die Skripte nutzen assoziative Arrays; beide pruefen das und
+  **bash ≥ 4** (die Skripte nutzen assoziative Arrays; alle drei pruefen das und
   brechen auf bash 3 mit klarer Meldung ab — z. B. macOS' Standard-`/bin/bash`).
   Alles andere laeuft *in Images* — die DB-Clients und `sqlite3` in den
   Compose-Containern und in `tools/harness-tools`, der Python-Typcheck der
@@ -102,9 +102,10 @@ ausführen könnte — nicht auf Vorrat.
    nicht percent-encoded werden müssen. `.env` ist gitignored, wird nie
    committet.
 4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.7.1`,
-   `postgis/postgis:18-3.6` (PostgreSQL 18 + PostGIS 3.6, digest-gepinnt),
+   `postgis/postgis:18-3.6` (PostgreSQL 18 + PostGIS 3.6),
    `mcr.microsoft.com/mssql/server:2022-latest`,
-   `mysql:8.4` und `gvenzl/oracle-free:23-faststart`, startet sie,
+   `mysql:8.4` und `gvenzl/oracle-free:23-faststart` (alle vier DB-Images
+   digest-gepinnt), startet sie,
    wartet auf „healthy“, führt einmalig `mssql-init` aus (legt die
    Datenbank `dmigrate` an — SQL Servers Default-Datenbank `master` wird
    bewusst nicht als Ziel genutzt; MySQL legt seine `dmigrate`-Datenbank
@@ -129,6 +130,9 @@ ausführen könnte — nicht auf Vorrat.
 - **Auth**: `--auth-mode disabled`, strikt Loopback-only (`127.0.0.1`).
 - **MCP-State-Dir**: `./state`, in den Container gemountet, Host-User-Owned
   (`.env` setzt `UID`/`GID`) — dateibasierte Upload-Segmente/Artefakte.
+- **Container-Umgebung**: der MCP-Container bekommt nur die fünf
+  `D_MIGRATE_LOCAL_*_URL`-Werte plus Postgres-User/-Passwort für den
+  Server-State-Block — nicht die ganze `.env` (keine SA-/Root-/Oracle-Passwörter).
 - **DB-Connections** (alle `.d-migrate.yaml`, Tenant `default`): lokales
   Postgres (`postgis/postgis:18-3.6`, `127.0.0.1:${PG_PORT:-5433}`) als
   `local_pg`; lokaler SQL Server
@@ -209,7 +213,8 @@ anderen Dialekte generiert, dort angewendet, wieder zurueckgelesen und
 verglichen. Ausgabe ist eine 5x5-Finding-Matrix plus die Finding-Codes je
 Zelle — das systematische Gegenstueck zum festen Repro des Smoke.
 
-Sie leert waehrend des Laufs die vier Testdatenbanken (ein Reverse traegt die
+Sie leert waehrend des Laufs alle fuenf Testdatenbanken — die vier Container
+und die SQLite-Datei (ein Reverse traegt die
 ganze Schemaflaeche, Reste wuerden beim Anwenden kollidieren) und laesst sie
 leer; der naechste `make smoke` baut alles neu auf. Die SQLite-Legs laufen im
 selben Werkzeug-Image wie der Smoke.
@@ -253,8 +258,11 @@ wenn sie fehlen).
 
 ## Upgrading
 
-Bump the image tag in `docker-compose.yml` (pinned to `1.7.1`), then
-`make up`.
+Image-Tag in `docker-compose.yml` anheben (gepinnt auf `1.7.1`), dann
+`make up`. Die vier DB-Images sind ebenfalls per Digest gepinnt: bewusst
+neu pinnen (die Compare-Zahlen der Erwartungsmatrix haengen daran, was die
+Server beim Reverse liefern), dann `make smoke` laufen lassen und den Diff
+pruefen.
 
 For production/multi-host use, switch `--auth-mode` to `jwt-jwks` (see
 spec §6.2) instead of binding non-loopback with auth disabled.

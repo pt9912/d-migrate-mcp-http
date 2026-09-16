@@ -6,6 +6,7 @@
 # bis zum ersten erfolgreichen initialize).
 # Aufruf:  ./scripts/mcp-bench.sh [--restart] [schemaRef]
 #          (schemaRef default: neuestes PostgreSQL-Reverse im Store)
+# Gebraucht: laufender Stack, jq, curl.
 # Bash >= 4 noetig. Muss VOR `set -o pipefail` stehen: dash/sh bricht dort
 # sonst mit "Illegal option" ab, bevor diese Pruefung greift.
 if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSION%%.*}" -lt 4 ]; then
@@ -39,7 +40,13 @@ cleanup() {
 }
 trap 'cleanup $?' EXIT
 
-set -a; set +e; . ./.env 2>/dev/null; set -e; set +a
+# Session-Aufbau und Tool-Calls aus der gemeinsamen Lib (vorher eine eigene
+# Kopie von session_new — genau die Drift, die die Lib vermeiden soll). Die
+# Messschleifen unten rufen curl weiter direkt auf: gemessen wird der rohe
+# HTTP-Roundtrip, nicht jq.
+RPC_ID=0
+fail() { echo "FAIL: $*" >&2; }
+. scripts/lib/mcp-client.sh
 
 stats() { sort -n | awk '{a[NR]=$1} END { if (NR==0) {print "(keine Messwerte)"; exit} if (NR%2) m=a[(NR+1)/2]; else m=(a[NR/2]+a[NR/2+1])/2; s=0; for(i=1;i<=NR;i++) s+=a[i]; printf "%5d %5d %5d %5d  n=%d\n", m, s/NR, a[1], a[NR], NR }'; }
 
@@ -50,16 +57,22 @@ rpc_file() { # $1 = payload-Datei -> stdout
     -d @"$1"
 }
 
-session_new() {
-  SESSION=$(curl -sf -D - -o /dev/null -X POST "$MCP_URL" \
-    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-    -d '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"'$PROTOCOL'","capabilities":{},"clientInfo":{"name":"mcp-bench","version":"0.1"}}}' \
-    | tr -d '\r' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}')
-  [ -n "$SESSION" ] || { echo "FAIL: kein MCP-Server auf $MCP_URL" >&2; return 1; }
-  curl -sf -o /dev/null -X POST "$MCP_URL" \
-    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-    -H "MCP-Session-Id: $SESSION" -H "MCP-Protocol-Version: $PROTOCOL" \
-    -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+# Neuestes PostgreSQL-Reverse im Store. schema_list traegt keinen Dialekt,
+# nur origin — deshalb wird der Artefakt-Kopf gelesen: der Reverse-Name
+# beginnt mit "__dmigrate_reverse__:<dialekt>:". Vorher zaehlte nur origin,
+# und nach einem Smoke war das neueste Reverse der Oracle-Round-Trip — die
+# Generate-Zeiten liefen gegen ein zufaelliges Quellschema und waren zwischen
+# Laeufen nicht vergleichbar.
+pg_reverse_ref() {
+  local list ref art txt
+  list=$(mcp_call schema_list '{"pageSize":40}') || return 1
+  while IFS=$'\t' read -r ref art; do
+    txt=$(mcp_call artifact_chunk_get "$(jq -nc --arg a "$art" '{artifactId:$a}')" | jq -r '.text // empty') || continue
+    case "$txt" in
+      *"name: __dmigrate_reverse__:postgresql:"*) echo "$ref"; return 0 ;;
+    esac
+  done < <(echo "$list" | jq -r '.schemas[] | select(.origin=="schema_reverse") | [.resourceUri, .artifactRef] | @tsv')
+  return 1
 }
 
 # ---- optional: Kaltstart messen (Container-Neustart bis erster initialize)
@@ -77,16 +90,16 @@ if $RESTART; then
   sleep 1   # Session-Header abwarten; frische Session unten
 fi
 
-session_new
+mcp_session || exit 1
 
 # ---- SMOKE_SCHEMA_REF: neuestes PostgreSQL-Reverse aus dem Store
 if [ -z "$SMOKE_SCHEMA_REF" ]; then
-  echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"schema_list","arguments":{"pageSize":40}}}' > "$TMP/pl.json"
-  SMOKE_SCHEMA_REF=$(rpc_file "$TMP/pl.json" 2>/dev/null | jq -r '.result.content[0].text // empty' 2>/dev/null \
-    | jq -r '[.schemas[] | select(.origin=="schema_reverse")][0].resourceUri // empty' 2>/dev/null || true)
+  SMOKE_SCHEMA_REF=$(pg_reverse_ref) || true
 fi
 if [ -z "$SMOKE_SCHEMA_REF" ]; then
-  echo "WARN: kein PG-Reverse-Schema im Store — schema_generate-Sektion entfaellt" >&2
+  echo "WARN: kein PG-Reverse-Schema im Store (make smoke legt eines an) — schema_generate-Sektion entfaellt" >&2
+else
+  echo "== Generate-Quelle: $SMOKE_SCHEMA_REF"
 fi
 echo "== Messphase: fast=$N_FAST store=$N_STORE generate=$N_GEN/Dialekt"
 
@@ -117,9 +130,9 @@ if [ -n "$SMOKE_SCHEMA_REF" ]; then
 fi
 
 echo "== Ergebnis (ms): median mean min max n"
-printf '  capabilities_list : '; stats < "$TMP/fast.txt"
+[ -f "$TMP/fast.txt" ]  && { printf '  capabilities_list : '; stats < "$TMP/fast.txt"; }
 [ -f "$TMP/store.txt" ] && { printf '  schema_list       : '; stats < "$TMP/store.txt"; }
-if [ -f "$TMP/gen.txt" ]; then printf '  schema_generate   : '; stats < "$TMP/gen.txt"; fi
+[ -f "$TMP/gen.txt" ]   && { printf '  schema_generate   : '; stats < "$TMP/gen.txt"; }
 
 # Explizit 0: die Ausgabe oben endet sonst auf einem Test (`[ -f ... ]`), dessen
 # Status der Shell als Exit-Code des Skripts gilt — ein erfolgreicher Lauf mit

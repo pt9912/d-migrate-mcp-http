@@ -56,10 +56,19 @@ trap 'cleanup $?' EXIT
 set -a; set +e; . ./.env 2>/dev/null; set -e; set +a   # UID-Zeile in .env ist readonly — Fehler ignorieren, Rest laden
 
 # Fehlerzustand als DATEI: fail() wird auch in Kommandosubstitutionen gerufen,
-# eine Variable erreicht das Elternskript von dort nicht.
-FAIL_FILE="$TMP_ROOT/failures-$$"
+# eine Variable erreicht das Elternskript von dort nicht. Die Datei liegt IM
+# Run-Verzeichnis: bei Erfolg wird sie mit geloescht, bei Fehlern bleibt sie
+# mit den Logs liegen (vorher unter $TMP_ROOT/failures-$$ und nie aufgeraeumt).
+FAIL_FILE="$TMP/failures"
 : > "$FAIL_FILE"
 fail() { echo "FAIL: $*" >&2; echo "$*" >> "$FAIL_FILE"; }
+# .env muss da sein und die Variablen tragen, die die Skript-Seite selbst
+# benutzt (die Container haben ihre eigene Umgebung). Ohne diese Pruefung
+# starb der Lauf erst in Schritt 5 an "unbound variable".
+[ -f .env ] || fail ".env fehlt (cp .env.example .env, Passwoerter setzen)"
+for v in POSTGRES_USER POSTGRES_DB MSSQL_SA_PASSWORD ORACLE_PASSWORD; do
+  [ -n "${!v:-}" ] || fail "$v nicht gesetzt (.env)"
+done
 # Host-Voraussetzungen: NUR docker + jq + curl. Datenbank-Clients, sqlite3 und
 # python3 kommen aus den Images (tools/harness-tools, die DB-Container) — der
 # Host wird nicht angefasst.
@@ -120,16 +129,26 @@ declare -A GEN_STATUS GEN_SKIPPED
 # spatialProfile je Ziel: nur wo es einen Sinn hat (PG=PostGIS-Typen,
 # SQLite=SpatiaLite-Aufrufe). Fuer die anderen wird es weggelassen.
 declare -A SPATIAL_PROFILE=([POSTGRESQL]=postgis [SQLITE]=spatialite)
+GEN_ERR=false
 for t in POSTGRESQL MSSQL MYSQL SQLITE ORACLE; do
   args=$(jq -nc --arg ref "dmigrate://tenants/default/schemas/$SCH_PG" --arg t "$t" \
     --arg sp "${SPATIAL_PROFILE[$t]:-}" \
     '{schemaRef:$ref,targetDialect:$t,format:"yaml"} + (if $sp == "" then {} else {spatialProfile:$sp} end)')
   res=$(mcp_call schema_generate "$args")
+  if ! echo "$res" | jq -e '.ddl' >/dev/null 2>&1; then
+    # Fehler-Payload statt DDL (z.B. VALIDATION_ERROR): vorher landete "null"
+    # in der DDL-Datei und der Apply meldete einen irrefuehrenden DDL-Fehler.
+    GEN_STATUS[$t]="GEN-ERR"; GEN_SKIPPED[$t]="?"; GEN_ERR=true
+    fail "schema_generate $t lieferte Fehler: $(echo "$res" | jq -r '.code // "?"') $(echo "$res" | jq -r '.message // ""' | head -c 120)"
+    continue
+  fi
   GEN_STATUS[$t]=$(echo "$res" | jq -r '.status')
   GEN_SKIPPED[$t]=$(echo "$res" | jq -r '.skippedCount')
   echo "$res" | jq -r '.ddl' > "$TMP/ddl_$t.sql"
   echo "   $t: status=${GEN_STATUS[$t]} skipped=${GEN_SKIPPED[$t]}"
 done
+# Harter Stopp: alles Weitere (Apply, Reverse, Compare) haengt an dieser DDL.
+if $GEN_ERR; then echo "== Fehler:"; cat "$FAIL_FILE"; exit 1; fi
 
 check_expect() {  # $1=Key in expectations  $2=Ist-Wert
   local exp; exp=$(grep -E "^$1=" "$EXPECT_FILE" 2>/dev/null | cut -d= -f2 || true)
@@ -204,11 +223,30 @@ fi
 # Oracle: Tabellen/View droppen, dann apply (generierte DDL endet auf ';;').
 # Achtung: die generierte DDL quotet alle Identifier, d.h. die Objekte heissen
 # in user_objects kleingeschrieben ('customers') — deshalb UPPER()-Vergleich.
+# CASCADE CONSTRAINTS ist Pflicht: ohne hing der Erfolg an der Heap-
+# Reihenfolge von user_objects — traf der Loop eine referenzierte Tabelle
+# (customers vor orders), brach der ganze Block mit ORA-02449 ab, still
+# (>/dev/null), und der Apply meldete danach ein irrefuehrendes ORA-00955.
+# Drop-Fehler werden jetzt wie beim Apply geprueft statt verworfen.
+ORACLE_DROP_RC=0
 docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
-  >/dev/null <<'EOF'
-BEGIN FOR o IN (SELECT object_name, object_type FROM user_objects WHERE UPPER(object_name) IN ('ORDER_SUMMARY','ORDER_ITEMS','ORDERS','PRODUCTS','CUSTOMERS','TYPE_PROBE','TYPE_MATRIX') ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"'; END LOOP; END;
+  > "$TMP/oracle_drop.log" 2>&1 <<'EOF' || ORACLE_DROP_RC=$?
+WHENEVER SQLERROR EXIT FAILURE
+BEGIN
+  FOR o IN (SELECT object_name, object_type FROM user_objects
+             WHERE object_type IN ('TABLE','VIEW')
+               AND UPPER(object_name) IN ('ORDER_SUMMARY','ORDER_ITEMS','ORDERS','PRODUCTS','CUSTOMERS','TYPE_PROBE','TYPE_MATRIX')
+             ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP
+    EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"' ||
+      CASE o.object_type WHEN 'TABLE' THEN ' CASCADE CONSTRAINTS PURGE' ELSE '' END;
+  END LOOP;
+END;
 /
 EOF
+if [ "$ORACLE_DROP_RC" != 0 ] || grep -qE '^(ORA-|SP2-|ERROR at)' "$TMP/oracle_drop.log"; then
+  sed -n '1,5p' "$TMP/oracle_drop.log" >&2
+  fail "oracle: Drop vor Apply fehlgeschlagen (Log: $TMP/oracle_drop.log)"
+fi
 { echo "WHENEVER SQLERROR EXIT FAILURE"; sed 's/;;/;/g' "$TMP/ddl_ORACLE.sql"; } > "$TMP/ddl_ORACLE_norm.sql"
 docker cp "$TMP/ddl_ORACLE_norm.sql" d-migrate-oracle:/tmp/smoke_ddl.sql >/dev/null
 ORACLE_APPLY_RC=0

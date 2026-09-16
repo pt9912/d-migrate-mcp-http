@@ -51,10 +51,20 @@ set -a; set +e; . ./.env 2>/dev/null; set -e; set +a
 # Fehlerzustand als DATEI, nicht als Variable: fail() wird auch aus
 # Kommandosubstitutionen ($(silent_losses_of ...)) gerufen, und eine dort
 # gesetzte Variable erreicht das Elternskript nie (frueher: Exit 0 auf einem
-# komplett kaputten Lauf).
-FAIL_FILE="$TMP_ROOT/failures-$$"
+# komplett kaputten Lauf). Die Datei liegt IM Run-Verzeichnis: bei Erfolg
+# wird sie mit geloescht, bei Fehlern bleibt sie mit den Logs liegen
+# (vorher unter $TMP_ROOT/failures-$$ und nie aufgeraeumt).
+FAIL_FILE="$TMP/failures"
 : > "$FAIL_FILE"
 fail() { echo "FAIL: $*" >&2; echo "$*" >> "$FAIL_FILE"; }
+
+# .env muss da sein und die Variablen tragen, die die Skript-Seite selbst
+# benutzt (die Container haben ihre eigene Umgebung). Ohne diese Pruefung
+# starb der Lauf erst mitten im Apply an "unbound variable".
+[ -f .env ] || fail ".env fehlt (cp .env.example .env, Passwoerter setzen)"
+for v in POSTGRES_USER POSTGRES_DB MSSQL_SA_PASSWORD ORACLE_PASSWORD; do
+  [ -n "${!v:-}" ] || fail "$v nicht gesetzt (.env)"
+done
 
 # Host-Voraussetzungen: NUR docker + jq + curl. Datenbank-Clients, sqlite3 und
 # python3 kommen aus den Images (tools/harness-tools, die DB-Container) — der
@@ -63,10 +73,19 @@ for tool in docker jq curl; do
   command -v "$tool" >/dev/null || fail "$tool fehlt auf dem Host (docker + jq + curl genuegen)"
 done
 docker compose version >/dev/null 2>&1 || fail "docker compose v2 fehlt"
-docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1 \
-  || docker build -q -t "$HARNESS_TOOL_IMAGE" tools/harness-tools >/dev/null
-docker image inspect "$PYTHON_IMAGE" >/dev/null 2>&1 \
-  || docker build -q --target py -t "$PYTHON_IMAGE" tools/harness-tools >/dev/null
+if ! docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1; then
+  docker build -q -t "$HARNESS_TOOL_IMAGE" tools/harness-tools >/dev/null 2>&1 \
+    || fail "Werkzeug-Image $HARNESS_TOOL_IMAGE fehlt/baubar? (make harness-tools)"
+fi
+if ! docker image inspect "$PYTHON_IMAGE" >/dev/null 2>&1; then
+  docker build -q --target py -t "$PYTHON_IMAGE" tools/harness-tools >/dev/null 2>&1 \
+    || fail "Python-Image $PYTHON_IMAGE fehlt/baubar? (make harness-tools)"
+fi
+[ ! -s "$FAIL_FILE" ] || { cat "$FAIL_FILE"; exit 1; }
+
+# Fehlerartefakte des VORIGEN Laufs entfernen: der Ordner wurde nie geleert,
+# alte und neue APPLY-FAIL/GEN-ERR-Dateien lagen sonst nebeneinander.
+rm -rf .repro-test/matrix-fail
 
 RPC_ID=0
 . scripts/lib/mcp-client.sh
@@ -99,19 +118,28 @@ seed_mysql() {
   ! grep -qiE '^ERROR|ERROR [0-9]+' "$TMP/seed_mysql.log"
 }
 seed_oracle() {
-  # WHENEVER SQLERROR EXIT FAILURE: sqlplus endet sonst mit 0 trotz ORA-Fehler
-  if ! docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
-       < <(sed 's/;;/;/g' scripts/types/oracle.sql; echo "WHENEVER SQLERROR EXIT FAILURE") \
-       > "$TMP/seed_oracle.log" 2>&1; then
-    return 1
-  fi
-  ! grep -qE '^(ORA-|SP2-|ERROR at)' "$TMP/seed_oracle.log"
-  # Metadaten fuer einen spaeteren Spatial-Index sind hier nicht noetig; nur aufraeumen:
+  # WHENEVER SQLERROR EXIT FAILURE muss VOR dem SQL stehen — es wirkt nur auf
+  # Folgestatements; angehaengt war es wirkungslos und sqlplus endete mit 0
+  # trotz ORA-Fehler. Das Log-Tor wird in rc gemerkt: als vorletztes Kommando
+  # stellte es sonst nicht den Rueckgabewert der Funktion (den stellte das
+  # Aufraeumen danach), ein kaputter Seed galt als OK und die ganze
+  # ORACLE-Zeile wurde gruen ohne Messung.
+  local rc=0
   docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
-    <<'SQL' >/dev/null
+    < <(echo "WHENEVER SQLERROR EXIT FAILURE"; sed 's/;;/;/g' scripts/types/oracle.sql) \
+    > "$TMP/seed_oracle.log" 2>&1 || rc=$?
+  if [ "$rc" = 0 ] && grep -qE '^(ORA-|SP2-|ERROR at)' "$TMP/seed_oracle.log"; then
+    rc=1
+  fi
+  if [ "$rc" = 0 ]; then
+    # Metadaten fuer einen spaeteren Spatial-Index sind hier nicht noetig; nur aufraeumen:
+    docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
+      <<'SQL' >/dev/null
 DELETE FROM USER_SDO_GEOM_METADATA WHERE TABLE_NAME='type_matrix';
 COMMIT;
 SQL
+  fi
+  return "$rc"
 }
 seed_sqlite() {
   sqlite_reset
@@ -245,14 +273,14 @@ clean_of() { case "$1" in PG) clean_pg;; MSSQL) clean_mssql;; MYSQL) clean_mysql
 # deklarierten Typnamen sind nominal, es gibt dort nichts zu verlieren.
 native_types_pg() {
   docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
-    "SELECT column_name || '|' || data_type FROM information_schema.columns WHERE table_name='type_matrix' ORDER BY ordinal_position" 2>/dev/null
+    "SELECT column_name || '|' || data_type FROM information_schema.columns WHERE table_name='type_matrix' ORDER BY ordinal_position"
 }
 native_types_mssql() {
   docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -b -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" \
-    -d dmigrate -W -s'|' -h-1 -Q "SELECT c.name + '|' + t.name FROM sys.columns c JOIN sys.types t ON t.user_type_id=c.user_type_id WHERE c.object_id=OBJECT_ID('type_matrix') ORDER BY c.column_id" 2>/dev/null
+    -d dmigrate -W -s'|' -h-1 -Q "SELECT c.name + '|' + t.name FROM sys.columns c JOIN sys.types t ON t.user_type_id=c.user_type_id WHERE c.object_id=OBJECT_ID('type_matrix') ORDER BY c.column_id"
 }
 native_types_mysql() {
-  docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -B -e "SELECT CONCAT(COLUMN_NAME,'"'"'|'"'"',COLUMN_TYPE) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='"'"'type_matrix'"'"' ORDER BY ORDINAL_POSITION" dmigrate' 2>/dev/null
+  docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -B -e "SELECT CONCAT(COLUMN_NAME,'"'"'|'"'"',COLUMN_TYPE) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='"'"'type_matrix'"'"' ORDER BY ORDINAL_POSITION" dmigrate'
 }
 native_types_oracle() {
   docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 <<'SQL'
@@ -265,6 +293,8 @@ SQL
 silent_losses_of() {  # $1=Dialekt $2=schemaId -> stdout: "spalte|quelltyp|neutraltyp"
   [ "$1" = "SQLITE" ] && return 0
   local nat="$TMP/native_$1.txt" art out rc=0
+  # (die native_types_* leiten stderr NICHT selbst nach /dev/null — sonst
+  #  bliebe die .err-Datei unten leer und die Fehlermeldung ohne Ursache)
   # Kein stilles Verschlucken: jede Stufe meldet ihren Fehler und die Zelle
   # erscheint als CHECK-FEHLER statt als "0" (eine Pruefung, die bei einem
   # Ausfuehrungsfehler Entwarnung gibt, ist schlimmer als keine Pruefung).

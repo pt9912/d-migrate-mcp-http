@@ -6,8 +6,8 @@
 
 A local Docker Compose setup that runs the
 [d-migrate](https://github.com/pt9912/d-migrate) MCP server (HTTP
-transport) against real Postgres, SQL Server, MySQL and SQLite/SpatiaLite
-test databases — d-migrate's four supported dialects — and registers it
+transport) against real Postgres, SQL Server, MySQL, Oracle and SQLite/SpatiaLite
+test databases — d-migrate's five supported dialects — and registers it
 project-scoped in Claude Code (`.mcp.json`). For anyone who wants to call
 d-migrate's schema/data tools as MCP tools from a Claude Code session
 without building/installing d-migrate by hand or wiring up connections and
@@ -46,7 +46,7 @@ infrastructure (`jwt-jwks`) that's only needed for non-loopback operation.
 
 As little configuration as possible, but enough to make real DB tools
 usable: every extra file or service (`.d-migrate.yaml`,
-`policy-rules.yaml`, the Postgres/SQL Server/MySQL containers) exists
+`policy-rules.yaml`, the Postgres/SQL Server/MySQL/Oracle containers) exists
 only because some concrete tool would otherwise fail to run — not
 speculatively.
 
@@ -70,7 +70,7 @@ speculatively.
 ---
 
 - **Host prerequisites:** `docker` (with Compose v2), `jq`, `curl` and
-  **bash ≥ 4** (the scripts use associative arrays; both scripts check this
+  **bash ≥ 4** (the scripts use associative arrays; all three scripts check this
   and abort with a clear message on bash 3, e.g. macOS's default `/bin/bash`).
   Everything else runs *inside images* — the DB clients and `sqlite3` in the
   Compose containers and in `tools/harness-tools`, the matrix's Python check in
@@ -100,9 +100,10 @@ speculatively.
    don't need percent-encoding in the URL. `.env` is gitignored, never
    committed.
 4. `make up` — pulls `ghcr.io/pt9912/d-migrate:1.7.1`,
-   `postgis/postgis:18-3.6` (PostgreSQL 18 + PostGIS 3.6, digest-pinned),
+   `postgis/postgis:18-3.6` (PostgreSQL 18 + PostGIS 3.6),
    `mcr.microsoft.com/mssql/server:2022-latest`,
-   `mysql:8.4` and `gvenzl/oracle-free:23-faststart`, starts them,
+   `mysql:8.4` and `gvenzl/oracle-free:23-faststart` (all four DB images
+   digest-pinned), starts them,
    waits for them to be healthy, runs a one-shot `mssql-init` step that
    creates the `dmigrate` database (SQL Server's default `master`
    database is deliberately not used as the target; MySQL creates its
@@ -128,6 +129,9 @@ speculatively.
 - **MCP state dir**: `./state`, bind-mounted into the container and owned
   by the host user (`.env` sets `UID`/`GID`) — holds file-backed upload
   segments and artifact content.
+- **Container environment**: the MCP container gets only the five
+  `D_MIGRATE_LOCAL_*_URL` values plus the Postgres user/password for the
+  server-state block — not the whole `.env` (no SA/root/Oracle passwords).
 - **DB connections** (all `.d-migrate.yaml`, tenant `default`): local
   Postgres (`postgis/postgis:18-3.6`, `127.0.0.1:${PG_PORT:-5433}`) as
   `local_pg`; local SQL Server
@@ -204,7 +208,8 @@ generated into all four other dialects, applied there, re-reversed and
 compared. The output is a 5×5 finding matrix plus the finding codes per
 cell — the systematic counterpart to the smoke's fixed repro.
 
-It empties the four test databases while it runs (a reverse carries the
+It empties all five test databases while it runs — the four containers and
+the SQLite file (a reverse carries the
 whole schema surface, so leftovers would collide on apply) and leaves them
 empty; the next `make smoke` rebuilds everything. The SQLite legs run in the
 same helper image as the smoke.
@@ -248,7 +253,9 @@ metadata is readable and fail loudly if it is not).
 ## Upgrading
 
 Bump the image tag in `docker-compose.yml` (pinned to `1.7.1`), then
-`make up`.
+`make up`. The four DB images are pinned by digest as well: re-pin them
+deliberately (the compare numbers in the expectation matrix depend on what
+the servers return on reverse), then run `make smoke` and review the diff.
 
 For production/multi-host use, switch `--auth-mode` to `jwt-jwks` (see
 spec §6.2) instead of binding non-loopback with auth disabled.

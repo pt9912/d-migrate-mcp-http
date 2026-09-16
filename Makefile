@@ -2,7 +2,6 @@ DOCKER_COMPOSE ?= docker compose
 HARNESS_TOOL_IMAGE ?= dmigrate-harness-tools:local
 HARNESS_PYTHON_IMAGE ?= dmigrate-harness-python:local
 
--include .env
 
 .PHONY: up down down-v logs restart smoke harness-tools type-matrix
 

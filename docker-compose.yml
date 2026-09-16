@@ -18,7 +18,7 @@ services:
     volumes:
       - pg-data:/var/lib/postgresql
       # Legt beim ersten Init des Volumes PostGIS im eigenen Schema an und
-      # setzt den search_path (siehe postgres-init/01-postgis.sql).
+      # setzt den search_path (siehe postgres-init/01-postgis.sh).
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
@@ -27,8 +27,12 @@ services:
       retries: 12
       start_period: 10s
 
+  # Alle DB-Images per Digest gepinnt (wie postgres): die Erwartungsmatrix
+  # haengt nicht nur an der d-migrate-Version, sondern auch daran, was die
+  # Server beim Reverse liefern. Stand beim Pinnen: SQL Server 2022 CU26,
+  # MySQL 8.4.11, oracle-free 23-faststart (Build 2026-08-30).
   mssql:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: mcr.microsoft.com/mssql/server:2022-latest@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
     container_name: d-migrate-mssql
     restart: unless-stopped
     environment:
@@ -46,7 +50,7 @@ services:
       start_period: 20s
 
   mssql-init:
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    image: mcr.microsoft.com/mssql/server:2022-latest@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
     container_name: d-migrate-mssql-init
     restart: "no"
     depends_on:
@@ -67,7 +71,7 @@ services:
       - "IF DB_ID('dmigrate') IS NULL CREATE DATABASE dmigrate"
 
   mysql:
-    image: mysql:8.4
+    image: mysql:8.4@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
     container_name: d-migrate-mysql
     restart: unless-stopped
     environment:
@@ -92,7 +96,7 @@ services:
   # FREEPDB1 angelegt (inkl. Tablespace-Quota). Der eingebaute HEALTHCHECK
   # des Images gilt; faststart bootet nach dem ersten Start in ~1-2 Min.
   oracle:
-    image: gvenzl/oracle-free:23-faststart
+    image: gvenzl/oracle-free:23-faststart@sha256:33322969a450d72c507b08d7f690d9e1d9b60aebaebc35a75b7c0b8ab4baac77
     container_name: d-migrate-oracle
     restart: unless-stopped
     environment:
@@ -125,12 +129,23 @@ services:
     # host networking so the server can bind 127.0.0.1 (required for
     # --auth-mode disabled, which is strictly loopback-only) while still
     # being reachable from the host at 127.0.0.1:8787. Also lets it reach
-    # postgres/mssql/mysql via the host-published
-    # 127.0.0.1:${PG_PORT}/${MSSQL_PORT}/${MYSQL_PORT}. Linux-only.
+    # postgres/mssql/mysql/oracle via the host-published
+    # 127.0.0.1:${PG_PORT}/${MSSQL_PORT}/${MYSQL_PORT}/${ORACLE_PORT}. Linux-only.
     network_mode: host
     user: "${UID:-1000}:${GID:-1000}"
-    env_file:
-      - .env
+    # Bewusst KEIN env_file: das reichte alle Secrets der .env (SA-/Root-/
+    # Oracle-Passwort, UID/GID) in den Container. Noetig sind nur die fuenf
+    # credentialRef-URLs aus .d-migrate.yaml und User/Passwort fuer den
+    # server.state-Block (${POSTGRES_USER}/${POSTGRES_PASSWORD} dort).
+    # Die Werte kommen per Compose-Interpolation aus .env.
+    environment:
+      D_MIGRATE_LOCAL_PG_URL: "${D_MIGRATE_LOCAL_PG_URL}"
+      D_MIGRATE_LOCAL_MSSQL_URL: "${D_MIGRATE_LOCAL_MSSQL_URL}"
+      D_MIGRATE_LOCAL_MYSQL_URL: "${D_MIGRATE_LOCAL_MYSQL_URL}"
+      D_MIGRATE_LOCAL_SQLITE_URL: "${D_MIGRATE_LOCAL_SQLITE_URL}"
+      D_MIGRATE_LOCAL_ORACLE_URL: "${D_MIGRATE_LOCAL_ORACLE_URL}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
     command:
       - mcp
       - serve
