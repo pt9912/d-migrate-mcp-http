@@ -217,21 +217,25 @@ for src in $DIALECTS; do
 done
 
 echo
-printf '%-8s' "Quelle"; for d in $DIALECTS; do printf '%-14s' "$d"; done; echo
+printf '%-8s' "Quelle"; for d in $DIALECTS; do printf '%-14s' "$d"; done; printf '%-10s\n' "Summe"
 declare -A COLSUM
+TOTAL=0
 for src in $DIALECTS; do
   printf '%-8s' "$src"
+  ROWSUM=0
   for dst in $DIALECTS; do
     [ "$src" = "$dst" ] && { printf '%-14s' "-"; continue; }
     v="${CELL[$src,$dst]:-?}"
     printf '%-14s' "$v"
     # nur echte Zahlen summieren (GEN-ERR/APPLY-FAIL u.ae. zaehlen nicht mit)
-    case "$v" in ''|*[!0-9]*) ;; *) COLSUM[$dst]=$(( ${COLSUM[$dst]:-0} + v ));; esac
+    case "$v" in ''|*[!0-9]*) ;; *) COLSUM[$dst]=$(( ${COLSUM[$dst]:-0} + v )); ROWSUM=$(( ROWSUM + v ));; esac
   done
-  echo
+  TOTAL=$(( TOTAL + ROWSUM ))
+  printf '%-10s\n' "$ROWSUM"
 done
 printf '%-8s' "Summe"
-for dst in $DIALECTS; do printf '%-14s' "${COLSUM[$dst]:-0}"; done; echo
+for dst in $DIALECTS; do printf '%-14s' "${COLSUM[$dst]:-0}"; done
+printf '%-10s\n' "$TOTAL"
 
 echo
 echo "== Finding-Codes je Zelle (ohne SCHEMA_NAME_CHANGED)"
