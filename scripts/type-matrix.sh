@@ -123,27 +123,42 @@ clean_pg() {
     -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;" 2>/dev/null || true
 }
 clean_mssql() {
+  # Erst alle FKs loesen (sonst schlaegt das DROP der referenzierten Tabellen
+  # fehl und es bleiben Reste stehen -> Matrix wird nicht deterministisch),
+  # dann Tabellen/Views/Sequenzen.
   docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
     -P "$MSSQL_SA_PASSWORD" -d dmigrate -Q "
+      DECLARE @fk NVARCHAR(MAX) = N'';
+      SELECT @fk = @fk + N'ALTER TABLE [' + OBJECT_SCHEMA_NAME(parent_object_id) + N'].[' + OBJECT_NAME(parent_object_id)
+                 + N'] DROP CONSTRAINT [' + name + N'];'
+        FROM sys.foreign_keys;
+      IF LEN(@fk) > 0 EXEC sp_executesql @fk;
       DECLARE @s NVARCHAR(MAX) = N'';
       SELECT @s = @s + N'DROP ' + CASE WHEN type='V' THEN 'VIEW' ELSE 'TABLE' END + N' [' + name + N'];'
         FROM sys.objects WHERE type IN ('U','V') AND is_ms_shipped = 0;
-      EXEC sp_executesql @s;" >/dev/null 2>&1 || true
+      SELECT @s = @s + N'DROP SEQUENCE [' + name + N'];' FROM sys.sequences WHERE is_ms_shipped = 0;
+      IF LEN(@s) > 0 EXEC sp_executesql @s;" >/dev/null 2>&1 || true
 }
 clean_mysql() {
   docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS dmigrate; CREATE DATABASE dmigrate;"' 2>/dev/null || true
 }
 clean_oracle() {
+  # Jeder Drop einzeln mit eigener Exception-Klausel: ein FK-gebundenes DROP
+  # (ORA-02449) brach sonst den ganzen Block ab und liess den Rest stehen.
+  # CASCADE CONSTRAINTS + PURGE RECYCLEBIN raeumen die Abhaengigkeiten mit ab.
   docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 >/dev/null 2>&1 <<'SQL' || true
 BEGIN
   FOR o IN (SELECT object_name, object_type FROM user_objects
-             WHERE object_type IN ('TABLE','VIEW') AND object_name NOT LIKE 'SYS_%'
-             ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP
-    EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"' ||
-      CASE WHEN o.object_type = 'TABLE' THEN ' PURGE' ELSE '' END;
+             WHERE object_type IN ('TABLE','VIEW','SEQUENCE') AND object_name NOT LIKE 'SYS_%') LOOP
+    BEGIN
+      EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"' ||
+        CASE o.object_type WHEN 'TABLE' THEN ' CASCADE CONSTRAINTS PURGE' ELSE '' END;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
   END LOOP;
 END;
 /
+PURGE RECYCLEBIN;
 DELETE FROM USER_SDO_GEOM_METADATA;
 COMMIT;
 SQL
@@ -152,7 +167,7 @@ clean_sqlite() { rm -f sqlite-data/local.db; }
 clean_of() { case "$1" in PG) clean_pg;; MSSQL) clean_mssql;; MYSQL) clean_mysql;; SQLITE) clean_sqlite;; ORACLE) clean_oracle;; esac; }
 
 # ---------------------------------------------------------------------- Matrix
-echo "== Typ-Matrix (Quelle -> Ziel: Findings des Compare Quelle<->Ziel)"
+echo "== Typ-Matrix (Quelle -> Ziel: Findings des Compare Quelle<->Ziel, ohne SCHEMA_NAME_CHANGED)"
 declare -A CELL CODES
 echo "-- Testdatenbanken leeren"
 for d in $DIALECTS; do clean_of "$d"; done
@@ -190,7 +205,10 @@ for src in $DIALECTS; do
     fi
     SCH_DST=$(reverse_conn "$(conn_of "$dst")") || { CELL[$src,$dst]="REV-FAIL"; continue; }
     cmp=$(mcp_call schema_compare "{\"left\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_SRC\"},\"right\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_DST\"},\"format\":\"yaml\"}" 2>/dev/null) || { CELL[$src,$dst]="CMP-FAIL"; continue; }
-    n=$(echo "$cmp" | jq '.findings | length')
+    # SCHEMA_NAME_CHANGED zaehlt nicht mit: der Reverse-Provenance-Name
+    # differiert zwischen zwei Dialekten immer und ist kein Typbefund —
+    # Zellwert und Code-Liste sind damit dieselbe Grundmenge.
+    n=$(echo "$cmp" | jq '[.findings[] | select(.code != "SCHEMA_NAME_CHANGED")] | length')
     CELL[$src,$dst]=$n
     codes=$(echo "$cmp" | jq -r '[.findings[] | select(.code!="SCHEMA_NAME_CHANGED") | .code] | group_by(.) | map("\(.[0]):\(length)") | join(" ")')
     CODES[$src,$dst]="$codes"
@@ -200,14 +218,20 @@ done
 
 echo
 printf '%-8s' "Quelle"; for d in $DIALECTS; do printf '%-14s' "$d"; done; echo
+declare -A COLSUM
 for src in $DIALECTS; do
   printf '%-8s' "$src"
   for dst in $DIALECTS; do
     [ "$src" = "$dst" ] && { printf '%-14s' "-"; continue; }
-    printf '%-14s' "${CELL[$src,$dst]:-?}"
+    v="${CELL[$src,$dst]:-?}"
+    printf '%-14s' "$v"
+    # nur echte Zahlen summieren (GEN-ERR/APPLY-FAIL u.ae. zaehlen nicht mit)
+    case "$v" in ''|*[!0-9]*) ;; *) COLSUM[$dst]=$(( ${COLSUM[$dst]:-0} + v ));; esac
   done
   echo
 done
+printf '%-8s' "Summe"
+for dst in $DIALECTS; do printf '%-14s' "${COLSUM[$dst]:-0}"; done; echo
 
 echo
 echo "== Finding-Codes je Zelle (ohne SCHEMA_NAME_CHANGED)"
