@@ -69,7 +69,9 @@ speculatively.
 
 ---
 
-- **Host prerequisites:** only `docker` (with Compose v2), `jq` and `curl`.
+- **Host prerequisites:** `docker` (with Compose v2), `jq`, `curl` and
+  **bash ≥ 4** (the scripts use associative arrays; both scripts check this
+  and abort with a clear message on bash 3, e.g. macOS's default `/bin/bash`).
   Everything else runs *inside images* — the DB clients and `sqlite3` in the
   Compose containers and in `tools/harness-tools`, the matrix's Python check in
   the `py` stage of the same Dockerfile. No host python, no host DB client, and
@@ -77,7 +79,9 @@ speculatively.
 
 ## Setup (after cloning)
 
-1. **Docker + Docker Compose v2** required. `network_mode: host` (used so
+1. **Docker + Docker Compose v2 and bash ≥ 4** required (bash 3 — macOS's
+   `/bin/bash` — fails on the scripts' associative arrays; use Homebrew's
+   `bash`). `network_mode: host` (used so
    the container can bind loopback yet stay reachable from the host) is
    **Linux-only** — this setup does not work as-is on macOS/Windows Docker
    Desktop.

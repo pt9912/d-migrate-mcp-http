@@ -70,7 +70,9 @@ ausführen könnte — nicht auf Vorrat.
 
 ---
 
-- **Host-Voraussetzungen:** nur `docker` (mit Compose v2), `jq` und `curl`.
+- **Host-Voraussetzungen:** `docker` (mit Compose v2), `jq`, `curl` und
+  **bash ≥ 4** (die Skripte nutzen assoziative Arrays; beide pruefen das und
+  brechen auf bash 3 mit klarer Meldung ab — z. B. macOS' Standard-`/bin/bash`).
   Alles andere laeuft *in Images* — die DB-Clients und `sqlite3` in den
   Compose-Containern und in `tools/harness-tools`, der Python-Typcheck der
   Matrix in der `py`-Stage derselben Dockerfile. Kein Host-Python, kein
@@ -78,7 +80,9 @@ ausführen könnte — nicht auf Vorrat.
 
 ## Setup (nach dem Klonen)
 
-1. **Docker + Docker Compose v2** nötig. `network_mode: host` (damit der
+1. **Docker + Docker Compose v2 und bash ≥ 4** nötig (bash 3 — macOS'
+   `/bin/bash` — scheitert an den assoziativen Arrays der Skripte; Homebrew-
+   `bash` verwenden). `network_mode: host` (damit der
    Container auf Loopback binden und trotzdem vom Host erreichbar sein
    kann) ist **Linux-only** — funktioniert so nicht unter macOS/Windows
    Docker Desktop.
