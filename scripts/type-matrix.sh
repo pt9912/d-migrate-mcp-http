@@ -12,13 +12,15 @@
 # Aufruf:  scripts/type-matrix.sh [--keep]      (--keep laesst die Tabellen stehen)
 # Gebraucht: laufender Stack (make up), jq, curl, docker; SQLite-Legs laufen
 # im Werkzeug-Image tools/harness-tools (wird bei Bedarf gebaut).
-set -euo pipefail
-cd "$(dirname "$0")/.."
-
+# Bash >= 4 noetig — MUSS vor `set -o pipefail` stehen: sh/dash bricht dort
+# sonst mit "Illegal option" ab, bevor diese Pruefung greift.
 if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSION%%.*}" -lt 4 ]; then
-  echo "FAIL: bash >= 4 noetig. Gefunden: ${BASH_VERSION:-nicht bash}" >&2
+  echo "FAIL: bash >= 4 noetig (assoziative Arrays). Gefunden: ${BASH_VERSION:-nicht bash}" >&2
   exit 1
 fi
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
 KEEP=false
 [ "${1:-}" = "--keep" ] && KEEP=true
@@ -37,8 +39,13 @@ trap 'rm -rf "$TMP"' EXIT
 
 set -a; set +e; . ./.env 2>/dev/null; set -e; set +a
 
-FAILED=0
-fail() { echo "FAIL: $*" >&2; FAILED=1; }
+# Fehlerzustand als DATEI, nicht als Variable: fail() wird auch aus
+# Kommandosubstitutionen ($(silent_losses_of ...)) gerufen, und eine dort
+# gesetzte Variable erreicht das Elternskript nie (frueher: Exit 0 auf einem
+# komplett kaputten Lauf).
+FAIL_FILE="$TMP_ROOT/failures-$$"
+: > "$FAIL_FILE"
+fail() { echo "FAIL: $*" >&2; echo "$*" >> "$FAIL_FILE"; }
 
 command -v jq >/dev/null || { echo "FAIL: jq fehlt" >&2; exit 1; }
 docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1 \
@@ -85,7 +92,7 @@ seed_sqlite() {
   # Kein `|| true`: ein fehlgeschlagener Seed (z.B. weil mod_spatialite nicht
   # ladbar ist) muss den Lauf scheitern lassen, nicht eine leere Datei
   # hinterlassen — sonst meldet die Matrix spaeter "?"/"0" statt Fehler.
-  docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD/sqlite-data:/data" -v "$PWD/scripts/types:/seed:ro" \
+  docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD/sqlite-data:/data" \
     --entrypoint sqlite3 "$HARNESS_TOOL_IMAGE" /data/local.db < scripts/types/sqlite.sql > "$TMP/seed_sqlite.log" 2>&1 \
     || { sed -n '1,5p' "$TMP/seed_sqlite.log" >&2; return 1; }
   grep -qiE '^Error|error:|Parse error|no such' "$TMP/seed_sqlite.log" && { sed -n '1,5p' "$TMP/seed_sqlite.log" >&2; return 1; }
@@ -93,36 +100,60 @@ seed_sqlite() {
 }
 seed_of() { case "$1" in PG) seed_pg;; MSSQL) seed_mssql;; MYSQL) seed_mysql;; SQLITE) seed_sqlite;; ORACLE) seed_oracle;; esac; }
 
+# Voraussetzung der Geometrie-Faelle: PostGIS-Schema im search_path. Fehlt sie,
+# liest d-migrate Geometrie ohne geometry_type/srid — die Zellen blieben gruen,
+# ohne etwas zu testen.
+assert_pg_geometry() {
+  local n
+  n=$(docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+    "SELECT count(*) FROM geometry_columns WHERE f_table_name='type_matrix';" 2>/dev/null || echo 0)
+  [ "${n:-0}" -ge 1 ] || fail "PostGIS-Metadaten fehlen (search_path? postgres-init gelaufen?) — Geometrie-Zellen wuerden still nichts testen"
+}
+
 # --------------------------------------------------------------- Apply je Dialekt
 # $1=Dialekt $2=DDL-Datei; Rueckgabe != 0 bei Fehler
 apply_pg() {
   docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -q < "$2" > "$TMP/apply_$1.log" 2>&1
 }
 apply_mssql() {
-  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
+  # -b: sqlcmd liefert sonst Exit 0 auch bei SQL-Fehlern; zusaetzlich das Log
+  # pruefen, weil Verbindungsfehler (Container weg, Login abgelehnt) kein
+  # "Msg ..., Level 1x" tragen.
+  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -b -C -S localhost -U sa \
     -P "$MSSQL_SA_PASSWORD" -d dmigrate < "$2" > "$TMP/apply_$1.log" 2>&1
-  ! grep -qE 'Msg [0-9]+, Level 1[5-9]' "$TMP/apply_$1.log"
+  ! grep -qiE 'Msg [0-9]+, Level|^Sqlcmd: Error|Cannot open database|Login failed' "$TMP/apply_$1.log"
 }
 apply_mysql() {
-  docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' 2> "$TMP/apply_$1.log" < "$2"
-  ! grep -qiE '^ERROR' "$TMP/apply_$1.log"
+  # Exit-Code UND Log: der Client endet bei Fehlern != 0, schreibt die Meldung
+  # aber nach stderr — beides pruefen, sonst gilt ein Abbruch als Erfolg.
+  if ! docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' > "$TMP/apply_$1.log" 2>&1 < "$2"; then
+    return 1
+  fi
+  ! grep -qiE '^ERROR|ERROR [0-9]+' "$TMP/apply_$1.log"
 }
 apply_oracle() {
-  sed 's/;;/;/g' "$2" > "$TMP/ddl_ora_norm.sql"
+  # WHENEVER SQLERROR EXIT FAILURE: sqlplus endet sonst mit 0 trotz ORA-Fehler
+  { echo "WHENEVER SQLERROR EXIT FAILURE"; sed 's/;;/;/g' "$2"; } > "$TMP/ddl_ora_norm.sql"
   docker cp "$TMP/ddl_ora_norm.sql" d-migrate-oracle:/tmp/matrix_ddl.sql >/dev/null
-  docker exec d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
-    @/tmp/matrix_ddl.sql > "$TMP/apply_$1.log" 2>&1
+  if ! docker exec d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
+       @/tmp/matrix_ddl.sql > "$TMP/apply_$1.log" 2>&1; then
+    return 1
+  fi
   ! grep -qE '^(ORA-|SP2-|ERROR at)' "$TMP/apply_$1.log"
 }
 apply_sqlite() {
-  docker run --rm -i --user "$(id -u):$(id -g)" \
-    -v "$PWD/sqlite-data:/data" -v "$(dirname "$2"):/ddl:ro" \
-    --entrypoint sqlite3 "$HARNESS_TOOL_IMAGE" \
-    -cmd "PRAGMA trusted_schema=ON;" \
-    -cmd "SELECT load_extension('mod_spatialite');" \
-    -cmd "SELECT InitSpatialMetaData(1);" \
-    /data/local.db < "$2" > "$TMP/apply_$1.log" 2>&1
-  ! grep -qiE '^Error|error:|Parse error|no such' "$TMP/apply_$1.log"
+  # Exit-Code UND Log: sqlite3 meldet Laufzeitfehler als
+  # "Runtime error near line N: ..." — das faengt kein '^Error'.
+  if ! docker run --rm -i --user "$(id -u):$(id -g)" \
+       -v "$PWD/sqlite-data:/data" -v "$(dirname "$2"):/ddl:ro" \
+       --entrypoint sqlite3 "$HARNESS_TOOL_IMAGE" \
+       -cmd "PRAGMA trusted_schema=ON;" \
+       -cmd "SELECT load_extension('mod_spatialite');" \
+       -cmd "SELECT InitSpatialMetaData(1);" \
+       /data/local.db < "$2" > "$TMP/apply_$1.log" 2>&1; then
+    return 1
+  fi
+  ! grep -qiE '^Error|error:|Parse error|no such|Runtime error' "$TMP/apply_$1.log"
 }
 apply_of() { local d="$1" f="$2"; case "$d" in PG) apply_pg "$d" "$f";; MSSQL) apply_mssql "$d" "$f";; MYSQL) apply_mysql "$d" "$f";; SQLITE) apply_sqlite "$d" "$f";; ORACLE) apply_oracle "$d" "$f";; esac; }
 
@@ -191,14 +222,15 @@ native_types_pg() {
     "SELECT column_name || '|' || data_type FROM information_schema.columns WHERE table_name='type_matrix' ORDER BY ordinal_position" 2>/dev/null
 }
 native_types_mssql() {
-  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" \
+  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -b -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" \
     -d dmigrate -W -s'|' -h-1 -Q "SELECT c.name + '|' + t.name FROM sys.columns c JOIN sys.types t ON t.user_type_id=c.user_type_id WHERE c.object_id=OBJECT_ID('type_matrix') ORDER BY c.column_id" 2>/dev/null
 }
 native_types_mysql() {
   docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -B -e "SELECT CONCAT(COLUMN_NAME,'"'"'|'"'"',COLUMN_TYPE) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='"'"'type_matrix'"'"' ORDER BY ORDINAL_POSITION" dmigrate' 2>/dev/null
 }
 native_types_oracle() {
-  docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 2>/dev/null <<'SQL'
+  docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 <<'SQL'
+WHENEVER SQLERROR EXIT FAILURE
 SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF TRIMSPOOL ON LINESIZE 200
 SELECT LOWER(column_name) || '|' || data_type FROM user_tab_columns WHERE UPPER(table_name) = 'TYPE_MATRIX' ORDER BY column_id;
 EXIT
@@ -216,9 +248,28 @@ silent_losses_of() {  # $1=Dialekt $2=schemaId -> stdout: "spalte|quelltyp|neutr
   fi
   art=$(artifact_of_schema "$2")
   [ -n "$art" ] || { fail "kein Artefakt zum Schema $2 ($1)"; echo "CHECK-FEHLER|$1|artefakt"; return 0; }
-  if ! mcp_call artifact_chunk_get "{\"artifactId\":\"$art\"}" 2>/dev/null | jq -r '.text' > "$TMP/neutral_$1.yaml"; then
-    fail "Reverse-Artefakt $1 nicht lesbar"; echo "CHECK-FEHLER|$1|artefakt"; return 0
-  fi
+  # ALLE Chunks lesen: ein Artefakt > 32 KiB wird sonst stillschweigend
+  # abgeschnitten, und ein Fehlerobjekt liefert den Text "null" mit rc 0.
+  : > "$TMP/neutral_$1.yaml"
+  local chunk="" cursor="null" guard=0
+  while :; do
+    if [ "$cursor" = "null" ]; then
+      payload=$(jq -nc --arg a "$art" '{artifactId:$a}')
+    else
+      payload=$(jq -nc --arg a "$art" --arg c "$cursor" '{artifactId:$a,nextChunkCursor:$c}')
+    fi
+    if ! chunk=$(mcp_call artifact_chunk_get "$payload" 2>/dev/null); then
+      fail "Artefakt $1 nicht lesbar (Chunk-Abruf)"; echo "CHECK-FEHLER|$1|artefakt"; return 0
+    fi
+    if ! printf '%s' "$chunk" | jq -e '.text' >/dev/null 2>&1; then
+      fail "Artefakt $1 lieferte Fehlerobjekt: $(printf '%s' "$chunk" | jq -r '.code // "?"' 2>/dev/null)"
+      echo "CHECK-FEHLER|$1|artefakt"; return 0
+    fi
+    printf '%s' "$chunk" | jq -r '.text' >> "$TMP/neutral_$1.yaml"
+    cursor=$(printf '%s' "$chunk" | jq -r '.nextChunkCursor // "null"')
+    [ "$cursor" = "null" ] && break
+    guard=$((guard + 1)); [ "$guard" -gt 40 ] && { fail "Artefakt $1: zu viele Chunks"; break; }
+  done
   # im Python-Image ausfuehren (Stage 'py' unseres Dockerfiles): weder Host
   # noch d-migrate-Image bringen python3 mit. Mount-Ziel NICHT /lib nennen —
   # das ueberschreibt das Loader-Verzeichnis und python3 startet nicht.
@@ -234,15 +285,19 @@ silent_losses_of() {  # $1=Dialekt $2=schemaId -> stdout: "spalte|quelltyp|neutr
 
 # ---------------------------------------------------------------------- Matrix
 echo "== Typ-Matrix (Quelle -> Ziel: Findings des Compare Quelle<->Ziel, ohne SCHEMA_NAME_CHANGED)"
-declare -A CELL CODES SILENT
+declare -A CELL CODES SILENT SKIPPED_CELL
 echo "-- Testdatenbanken leeren"
 for d in $DIALECTS; do clean_of "$d"; done
 for src in $DIALECTS; do
   echo "-- Quelle $src: seeden + reverse"
   if ! seed_of "$src" > "$TMP/seed_$src.log" 2>&1; then
-    echo "   Seed $src fehlgeschlagen (Log: $TMP/seed_$src.log)"; continue
+    fail "Seed $src fehlgeschlagen (Log: $TMP/seed_$src.log)"
+    echo "   Seed $src fehlgeschlagen (Log: $TMP/seed_$src.log)"
+    SILENT[$src]="CHECK-FEHLER|$src|seed"   # sonst meldete Achse 2 faelschlich 0
+    continue
   fi
-  SCH_SRC=$(reverse_conn "$(conn_of "$src")") || { echo "   Reverse $src fehlgeschlagen"; continue; }
+  [ "$src" = "PG" ] && assert_pg_geometry
+  SCH_SRC=$(reverse_conn "$(conn_of "$src")") || { fail "Reverse $src fehlgeschlagen"; echo "   Reverse $src fehlgeschlagen"; continue; }
   # zweite Achse: Verluste schon beim Zuruecklesen (unsichtbar im Quell<->Ziel-Vergleich)
   SILENT[$src]=$(silent_losses_of "$src" "$SCH_SRC")
   for dst in $DIALECTS; do
@@ -251,19 +306,30 @@ for src in $DIALECTS; do
     args=$(jq -nc --arg ref "dmigrate://tenants/default/schemas/$SCH_SRC" --arg t "$(api_of "$dst")" --arg sp "$prof" \
       '{schemaRef:$ref,targetDialect:$t,format:"yaml"} + (if $sp=="" then {} else {spatialProfile:$sp} end)')
     if ! res=$(mcp_call schema_generate "$args" 2>/dev/null); then
-      CELL[$src,$dst]="GEN-FAIL"; continue
+      fail "Generate $src->$dst fehlgeschlagen"; CELL[$src,$dst]="GEN-FAIL"; continue
     fi
     if ! echo "$res" | jq -e '.ddl' > /dev/null 2>&1; then
       # Fehler-Payload statt DDL (z.B. VALIDATION_ERROR/INTERNAL_AGENT_ERROR)
       mkdir -p .repro-test/matrix-fail
       echo "$res" > ".repro-test/matrix-fail/gen_${src}_${dst}.json"
       CELL[$src,$dst]="GEN-ERR"
-      echo "   GEN-ERR $src->$dst: $(echo "$res" | jq -r '.code // "?"' 2>/dev/null) $(echo "$res" | jq -r '.message // ""' 2>/dev/null | head -c 120)"
+      fail "Generate $src->$dst lieferte Fehler: $(echo "$res" | jq -r '.code // "?"' 2>/dev/null) $(echo "$res" | jq -r '.message // ""' 2>/dev/null | head -c 120)"
       continue
     fi
     echo "$res" | jq -r '.ddl' > "$TMP/ddl_${src}_${dst}.sql"
+    # status/skippedCount auswerten: eine DDL, die nur aus Kommentaren besteht
+    # (z.B. E052-Skip der ganzen Tabelle), ist keine Messung — sie als Zahl in
+    # die Summen zu nehmen hiesse, den Skip im Ergebnis zu verstecken.
+    GEN_SKIPPED_CELL=$(echo "$res" | jq -r '.skippedCount // 0')
+    if ! grep -qE '^[[:space:]]*CREATE ' "$TMP/ddl_${src}_${dst}.sql"; then
+      CELL[$src,$dst]="VOID(skip=$GEN_SKIPPED_CELL)"
+      SKIPPED_CELL[$src,$dst]="gen-skipped=$GEN_SKIPPED_CELL"
+      continue
+    fi
+    SKIPPED_CELL[$src,$dst]="gen-skipped=$GEN_SKIPPED_CELL"
     clean_of "$dst"
     if ! apply_of "$dst" "$TMP/ddl_${src}_${dst}.sql"; then
+      fail "Apply $src->$dst fehlgeschlagen"
       CELL[$src,$dst]="APPLY-FAIL"
       mkdir -p .repro-test/matrix-fail
       cp "$TMP/ddl_${src}_${dst}.sql" ".repro-test/matrix-fail/ddl_${src}_${dst}.sql" 2>/dev/null || true
@@ -271,8 +337,8 @@ for src in $DIALECTS; do
       echo "   APPLY-FAIL $src->$dst: $(grep -m1 -E 'Msg [0-9]+, Level|^ORA-|^ERROR|^Error' "$TMP/apply_$dst.log" 2>/dev/null | head -1) (DDL: .repro-test/matrix-fail/)"
       continue
     fi
-    SCH_DST=$(reverse_conn "$(conn_of "$dst")") || { CELL[$src,$dst]="REV-FAIL"; continue; }
-    cmp=$(mcp_call schema_compare "{\"left\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_SRC\"},\"right\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_DST\"},\"format\":\"yaml\"}" 2>/dev/null) || { CELL[$src,$dst]="CMP-FAIL"; continue; }
+    SCH_DST=$(reverse_conn "$(conn_of "$dst")") || { fail "Reverse $dst fehlgeschlagen"; CELL[$src,$dst]="REV-FAIL"; continue; }
+    cmp=$(mcp_call schema_compare "{\"left\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_SRC\"},\"right\":{\"schemaRef\":\"dmigrate://tenants/default/schemas/$SCH_DST\"},\"format\":\"yaml\"}" 2>/dev/null) || { fail "Compare $src->$dst fehlgeschlagen"; CELL[$src,$dst]="CMP-FAIL"; continue; }
     # SCHEMA_NAME_CHANGED zaehlt nicht mit: der Reverse-Provenance-Name
     # differiert zwischen zwei Dialekten immer und ist kein Typbefund —
     # Zellwert und Code-Liste sind damit dieselbe Grundmenge.
@@ -310,7 +376,7 @@ echo "== Finding-Codes je Zelle (ohne SCHEMA_NAME_CHANGED)"
 for src in $DIALECTS; do
   for dst in $DIALECTS; do
     [ "$src" = "$dst" ] && continue
-    [ -n "${CODES[$src,$dst]:-}" ] && printf '  %-7s -> %-7s %s\n' "$src" "$dst" "${CODES[$src,$dst]}"
+    [ -n "${CODES[$src,$dst]:-}" ] && printf '  %-7s -> %-7s %s  [%s]\n' "$src" "$dst" "${CODES[$src,$dst]}" "${SKIPPED_CELL[$src,$dst]:-}"
   done
 done
 
@@ -338,4 +404,4 @@ if [ "$KEEP" = false ]; then
   for d in $DIALECTS; do clean_of "$d"; done
   echo "(Tabellen aufgeraeumt; --keep laesst sie stehen)"
 fi
-[ "$FAILED" = 0 ] || exit 1
+[ ! -s "$FAIL_FILE" ] || { echo "== Fehler:"; cat "$FAIL_FILE"; exit 1; }

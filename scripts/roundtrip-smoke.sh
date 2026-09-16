@@ -46,87 +46,49 @@ trap 'rm -rf "$TMP"' EXIT
 
 set -a; set +e; . ./.env 2>/dev/null; set -e; set +a   # UID-Zeile in .env ist readonly — Fehler ignorieren, Rest laden
 
-fail() { echo "FAIL: $*" >&2; FAILED=1; }
+# Fehlerzustand als DATEI: fail() wird auch in Kommandosubstitutionen gerufen,
+# eine Variable erreicht das Elternskript von dort nicht.
+FAIL_FILE="$TMP_ROOT/failures-$$"
+: > "$FAIL_FILE"
+fail() { echo "FAIL: $*" >&2; echo "$*" >> "$FAIL_FILE"; }
 command -v jq >/dev/null || fail "jq nicht installiert"
 # Werkzeug-Image fuer den SQLite-/SpatiaLite-Leg (einmalig bauen, dann gecacht)
-docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1 \
-  || docker build -q -t "$HARNESS_TOOL_IMAGE" tools/harness-tools >/dev/null 2>&1 \
-  || fail "Werkzeug-Image $HARNESS_TOOL_IMAGE fehlt (make harness-tools)"
+if ! docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1; then
+  docker build -q -t "$HARNESS_TOOL_IMAGE" tools/harness-tools >/dev/null 2>&1 \
+    || fail "Werkzeug-Image $HARNESS_TOOL_IMAGE fehlt/baubar? (make harness-tools)"
+fi
 
 # ---------------------------------------------------------------- MCP client
+# Gemeinsame Bibliothek statt eigener Kopie (die beiden waren schon
+# auseinandergelaufen: unterschiedliche Poll-Zahlen und pageSize).
 RPC_ID=0
-mcp_call() {  # $1=tool $2=args-json  -> stdout: Tool-Ergebnis (JSON-Text)
-  RPC_ID=$((RPC_ID + 1))
-  local body
-  body=$(jq -nc --argjson id "$RPC_ID" --arg tool "$1" --argjson args "$2" \
-    '{jsonrpc:"2.0",id:$id,method:"tools/call",params:{name:$tool,arguments:$args}}')
-  curl -sf -X POST "$MCP_URL" \
-    -H 'Content-Type: application/json' \
-    -H 'Accept: application/json, text/event-stream' \
-    -H "MCP-Session-Id: $SESSION" \
-    -H "MCP-Protocol-Version: $PROTOCOL" \
-    -d "$body" | jq -re '.result.content[0].text'
-}
+. scripts/lib/mcp-client.sh
+mcp_session || exit 1
 
-mcp_session() {
-  local sid
-  sid=$(curl -sf -D - -o /dev/null -X POST "$MCP_URL" \
-    -H 'Content-Type: application/json' \
-    -H 'Accept: application/json, text/event-stream' \
-    -d "$(jq -nc '{jsonrpc:"2.0",id:0,method:"initialize",params:{protocolVersion:$p,capabilities:{},clientInfo:{name:"roundtrip-smoke",version:"0.1"}}}' --arg p "$PROTOCOL")" \
-    | tr -d '\r' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}')
-  [ -n "$sid" ] || { echo "FAIL: kein MCP-Server auf $MCP_URL — laeuft der Stack (make up)?" >&2; exit 1; }
-  curl -sf -o /dev/null -X POST "$MCP_URL" \
-    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-    -H "MCP-Session-Id: $sid" -H "MCP-Protocol-Version: $PROTOCOL" \
-    -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-  echo "$sid"
-}
-SESSION=$(mcp_session)
-
-await_job() {  # $1=jobId -> stdout: result-JSON des Jobs
-  local st res
-  for _ in $(seq 1 60); do
-    res=$(mcp_call job_status_get "{\"jobId\":\"$1\"}")
-    st=$(echo "$res" | jq -r '.status')
-    case "$st" in
-      SUCCEEDED) echo "$res"; return 0 ;;
-      FAILED|CANCELLED) fail "Job $1 endete: $st"; return 1 ;;
-    esac
-    sleep 2
-  done
-  fail "Job $1: Timeout nach 120s"; return 1
-}
-
-reverse_conn() {  # $1=connectionName -> stdout: schemaId
-  local job res art
-  job=$(mcp_call schema_reverse_start \
-    "{\"connectionId\":\"dmigrate://tenants/default/connections/$1\",\"idempotencyKey\":\"smoke-$(date +%s)-$1-$RANDOM\"}" \
-    | jq -r '.jobId')
-  res=$(await_job "$job") || return 1
-  art=$(echo "$res" | jq -r '.artifacts[0]' | sed 's|.*/artifacts/||')
-  mcp_call schema_list '{}' | jq -r --arg a "$art" \
-    '.schemas[] | select(.artifactRef==$a) | .schemaId'
-}
 
 # ------------------------------------------------------------ 1. Preflight
 echo "== 1. Preflight"
-FAILED=0
 for c in d-migrate-postgres d-migrate-mssql d-migrate-mysql d-migrate-oracle d-migrate-mcp; do
   s=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$c" 2>/dev/null || echo "fehlt")
   [ "$s" = healthy ] || [ "$s" = running ] || fail "$c: $s"
 done
 # d-migrate-Version protokollieren
 mcp_call capabilities_list '{}' | jq -r '"   Server: \(.serverName), MCP \(.mcpProtocolVersion)"'
-[ "$FAILED" = 0 ] || exit 1
+docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1 || fail "Werkzeug-Image fehlt"
+[ ! -s "$FAIL_FILE" ] || { cat "$FAIL_FILE"; exit 1; }
 
 # ------------------------------------------------- 2. local_pg seeden
 echo "== 2. local_pg seeden (repro_schema.sql)"
 docker exec d-migrate-postgres sh -c \
   'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q \
-   -c "DROP VIEW IF EXISTS order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers, type_probe; DROP TYPE IF EXISTS order_status;"'
+   -c "DROP VIEW IF EXISTS order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers, type_probe, type_matrix; DROP TYPE IF EXISTS order_status; DROP TYPE IF EXISTS mood;"'
 docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -v ON_ERROR_STOP=1 -q < "$REPRO_DIR/roundtrip-repro-postgres.sql"
+# Voraussetzung der Geometrie-Faelle: PostGIS-Schema im search_path, sonst
+# liest d-migrate Geometrie ohne geometry_type/srid — still, ohne Finding.
+GEOM=$(docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
+  "SELECT count(*) FROM geometry_columns WHERE f_table_name='type_probe';" 2>/dev/null || echo 0)
+[ "${GEOM:-0}" -ge 1 ] || fail "PostGIS-Metadaten fehlen (search_path? init-Skript gelaufen?) — Geometrie-Faelle wuerden still nichts testen"
 echo "   OK"
 
 # ------------------------------------------ 3. Reverse auf allen 5 Connections
@@ -183,16 +145,15 @@ echo "== 5. DDL anwenden (nativ)"
 rm -f sqlite-data/local.db
 # if ! ... : sqlite3 endet bei SQL-Fehlern != 0 — unter `set -e` wuerde der
 # Lauf sonst hier abbrechen, statt den Fehler unten zu melden.
-if ! docker run --rm -i --user "$(id -u):$(id -g)" \
+SQLITE_APPLY_RC=0
+docker run --rm -i --user "$(id -u):$(id -g)" \
   -v "$PWD/sqlite-data:/data" -v "$TMP:/ddl:ro" \
   --entrypoint sqlite3 "$HARNESS_TOOL_IMAGE" \
   -cmd "PRAGMA trusted_schema=ON;" \
   -cmd "SELECT load_extension('mod_spatialite');" \
   -cmd "SELECT InitSpatialMetaData(1);" \
-  /data/local.db < "$TMP/ddl_SQLITE.sql" > "$TMP/sqlite_apply.log" 2>&1; then
-  :
-fi
-if grep -qiE '^Error|error:|Parse error|no such' "$TMP/sqlite_apply.log"; then
+  /data/local.db < "$TMP/ddl_SQLITE.sql" > "$TMP/sqlite_apply.log" 2>&1 || SQLITE_APPLY_RC=$?
+if [ "$SQLITE_APPLY_RC" != 0 ] || grep -qiE '^Error|error:|Parse error|no such|Runtime error' "$TMP/sqlite_apply.log"; then
   sed -n '1,10p' "$TMP/sqlite_apply.log" >&2
   fail "sqlite: DDL-Fehler (Log: $TMP/sqlite_apply.log)"
 fi
@@ -200,12 +161,17 @@ echo "   sqlite: OK"
 # MySQL: Datenbank neu anlegen
 docker exec d-migrate-mysql sh -c \
   'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS dmigrate; CREATE DATABASE dmigrate;"' 2>/dev/null
-docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' 2>/dev/null \
-  < "$TMP/ddl_MYSQL.sql"; echo "   mysql: OK"
+if ! docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' \
+     > "$TMP/mysql_apply.log" 2>&1 < "$TMP/ddl_MYSQL.sql"; then
+  sed -n '1,5p' "$TMP/mysql_apply.log" >&2
+  fail "mysql: DDL-Fehler (Log: $TMP/mysql_apply.log)"
+fi
+grep -qiE '^ERROR|ERROR [0-9]+' "$TMP/mysql_apply.log" && fail "mysql: DDL-Fehler (Log: $TMP/mysql_apply.log)"
+echo "   mysql: OK"
 # MSSQL: Tabellen/View droppen, dann apply
 docker exec d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
   -P "$MSSQL_SA_PASSWORD" -d dmigrate -Q \
-  "IF OBJECT_ID('order_summary','V') IS NOT NULL DROP VIEW order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers, type_probe;" \
+  "IF OBJECT_ID('order_summary','V') IS NOT NULL DROP VIEW order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers, type_probe, type_matrix;" \
   > /dev/null
 docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
   -P "$MSSQL_SA_PASSWORD" -d dmigrate \
@@ -217,7 +183,7 @@ echo "   mssql: OK"
 # in user_objects kleingeschrieben ('customers') — deshalb UPPER()-Vergleich.
 docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
   >/dev/null <<'EOF'
-BEGIN FOR o IN (SELECT object_name, object_type FROM user_objects WHERE UPPER(object_name) IN ('ORDER_SUMMARY','ORDER_ITEMS','ORDERS','PRODUCTS','CUSTOMERS','TYPE_PROBE') ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"'; END LOOP; END;
+BEGIN FOR o IN (SELECT object_name, object_type FROM user_objects WHERE UPPER(object_name) IN ('ORDER_SUMMARY','ORDER_ITEMS','ORDERS','PRODUCTS','CUSTOMERS','TYPE_PROBE','TYPE_MATRIX') ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"'; END LOOP; END;
 /
 EOF
 sed 's/;;/;/g' "$TMP/ddl_ORACLE.sql" > "$TMP/ddl_ORACLE_norm.sql"
@@ -265,9 +231,11 @@ printf '   %-10s %-12s %-8s %-10s\n' MYSQL "${GEN_SKIPPED[MYSQL]}" "${GEN_STATUS
 printf '   %-10s %-12s %-8s %-10s\n' SQLITE "${GEN_SKIPPED[SQLITE]}" "${GEN_STATUS[SQLITE]}" "${COMPARE_N[SQLITE]}"
 printf '   %-10s %-12s %-8s %-10s\n' ORACLE "${GEN_SKIPPED[ORACLE]}" "${GEN_STATUS[ORACLE]}" "${COMPARE_N[ORACLE]}"
 
-if [ "$FAILED" = 0 ]; then
+if [ ! -s "$FAIL_FILE" ]; then
   echo "SMOKE OK"
 else
+  echo "== Fehler:"
+  cat "$FAIL_FILE"
   echo "SMOKE FEHLGESCHLAGEN — Abweichungen oben. Nach Pruefung: --update-expectations"
   exit 1
 fi

@@ -29,7 +29,7 @@ harness-tools:
 	docker build --target py -t $(HARNESS_PYTHON_IMAGE) tools/harness-tools
 
 smoke:
-	bash scripts/roundtrip-smoke.sh $(UPDATE)
+	HARNESS_TOOL_IMAGE=$(HARNESS_TOOL_IMAGE) bash scripts/roundtrip-smoke.sh $(UPDATE)
 
 type-matrix:
-	bash scripts/type-matrix.sh $(KEEP)
+	HARNESS_TOOL_IMAGE=$(HARNESS_TOOL_IMAGE) PYTHON_IMAGE=$(HARNESS_PYTHON_IMAGE) bash scripts/type-matrix.sh $(KEEP)

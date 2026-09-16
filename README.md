@@ -145,7 +145,7 @@ speculatively.
 ```bash
 make up        # start (test databases, then d-migrate-mcp)
 make down      # stop
-make down-v    # stop and also drop the postgres volume
+make down-v    # stop and drop ALL db volumes (pg/mssql/mysql/oracle)
 make smoke     # round-trip smoke test (see below)
 make logs      # tail logs
 make restart   # restart d-migrate-mcp — pick up .d-migrate.yaml / policy-rules.yaml edits
@@ -213,6 +213,27 @@ comparing the JVM and native images).
 - [Anwenderhandbuch](https://github.com/pt9912/d-migrate/blob/main/docs/user/anwenderhandbuch.md)
 - [Administrationshandbuch](https://github.com/pt9912/d-migrate/blob/main/docs/user/administrationshandbuch.md)
 - [MCP server spec](https://github.com/pt9912/d-migrate/blob/main/spec/mcp-server.md)
+
+## Upgrading an existing checkout
+
+Two stack changes are **not** drop-in for an existing `pg-data` volume:
+
+- The Postgres image moved from `postgres:17.10-trixie` to
+  `postgis/postgis:18-3.6` (a **major** version bump). PostgreSQL refuses to
+  start on a data directory from an older major version, so the container
+  restart-loops and `make up` never becomes healthy. Recreate the volume
+  first: `make down-v` (this drops **all four** DB volumes — `pg-data`,
+  `mssql-data`, `mysql-data`, `oracle-data`; the test databases are rebuilt
+  from the seeds on the next run).
+- PG 18 expects the volume at `/var/lib/postgresql` (without `/data`); the
+  compose file already mounts it there.
+
+If you already have a running volume: `make down-v && make up`. The PostGIS
+extension and the `search_path` entry are created by
+`postgres-init/01-postgis.sh`, which the postgres entrypoint only runs on a
+**fresh** volume — with a pre-existing volume, create them by hand or
+recreate the volume (the smoke and the type matrix now assert the geometry
+metadata is readable and fail loudly if it is not).
 
 ## Upgrading
 
