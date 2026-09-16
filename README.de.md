@@ -70,6 +70,12 @@ ausführen könnte — nicht auf Vorrat.
 
 ---
 
+- **Host-Voraussetzungen:** nur `docker` (mit Compose v2), `jq` und `curl`.
+  Alles andere laeuft *in Images* — die DB-Clients und `sqlite3` in den
+  Compose-Containern und in `tools/harness-tools`, der Python-Typcheck der
+  Matrix in der `py`-Stage derselben Dockerfile. Kein Host-Python, kein
+  Host-DB-Client, und nichts wird ausserhalb des Repos geschrieben.
+
 ## Setup (nach dem Klonen)
 
 1. **Docker + Docker Compose v2** nötig. `network_mode: host` (damit der

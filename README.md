@@ -69,6 +69,12 @@ speculatively.
 
 ---
 
+- **Host prerequisites:** only `docker` (with Compose v2), `jq` and `curl`.
+  Everything else runs *inside images* — the DB clients and `sqlite3` in the
+  Compose containers and in `tools/harness-tools`, the matrix's Python check in
+  the `py` stage of the same Dockerfile. No host python, no host DB client, and
+  nothing is written outside the repo.
+
 ## Setup (after cloning)
 
 1. **Docker + Docker Compose v2** required. `network_mode: host` (used so

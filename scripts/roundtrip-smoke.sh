@@ -51,7 +51,13 @@ set -a; set +e; . ./.env 2>/dev/null; set -e; set +a   # UID-Zeile in .env ist r
 FAIL_FILE="$TMP_ROOT/failures-$$"
 : > "$FAIL_FILE"
 fail() { echo "FAIL: $*" >&2; echo "$*" >> "$FAIL_FILE"; }
-command -v jq >/dev/null || fail "jq nicht installiert"
+# Host-Voraussetzungen: NUR docker + jq + curl. Datenbank-Clients, sqlite3 und
+# python3 kommen aus den Images (tools/harness-tools, die DB-Container) — der
+# Host wird nicht angefasst.
+for tool in docker jq curl; do
+  command -v "$tool" >/dev/null || fail "$tool fehlt auf dem Host (docker + jq + curl genuegen)"
+done
+docker compose version >/dev/null 2>&1 || fail "docker compose v2 fehlt"
 # Werkzeug-Image fuer den SQLite-/SpatiaLite-Leg (einmalig bauen, dann gecacht)
 if ! docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1; then
   docker build -q -t "$HARNESS_TOOL_IMAGE" tools/harness-tools >/dev/null 2>&1 \

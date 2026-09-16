@@ -47,7 +47,13 @@ FAIL_FILE="$TMP_ROOT/failures-$$"
 : > "$FAIL_FILE"
 fail() { echo "FAIL: $*" >&2; echo "$*" >> "$FAIL_FILE"; }
 
-command -v jq >/dev/null || { echo "FAIL: jq fehlt" >&2; exit 1; }
+# Host-Voraussetzungen: NUR docker + jq + curl. Datenbank-Clients, sqlite3 und
+# python3 kommen aus den Images (tools/harness-tools, die DB-Container) — der
+# Host wird nicht angefasst.
+for tool in docker jq curl; do
+  command -v "$tool" >/dev/null || fail "$tool fehlt auf dem Host (docker + jq + curl genuegen)"
+done
+docker compose version >/dev/null 2>&1 || fail "docker compose v2 fehlt"
 docker image inspect "$HARNESS_TOOL_IMAGE" >/dev/null 2>&1 \
   || docker build -q -t "$HARNESS_TOOL_IMAGE" tools/harness-tools >/dev/null
 docker image inspect "$PYTHON_IMAGE" >/dev/null 2>&1 \
