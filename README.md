@@ -15,16 +15,16 @@ state manually.
 
 ## What can I do today?
 
-- `make up` starts Postgres and the MCP server; it's then reachable at
-  `http://127.0.0.1:8787/mcp`.
+- `make up` starts the test databases and the MCP server; it's then
+  reachable at `http://127.0.0.1:8787/mcp`.
 - Once you approve the project-scoped `.mcp.json` server in Claude Code,
-  22 tools are available (`schema_validate`, `schema_reverse_start`,
+  24 tools are available (`schema_validate`, `schema_reverse_start`,
   `data_profile_start`, `job_status_get`, …).
 - `schema_reverse_start` against any of the five wired-up connections
   (`local_pg`, `local_mssql`, `local_mysql`, `local_sqlite`,
   `local_oracle`) returns
   `SUCCEEDED` with an artifact — verified via live tool calls against all
-  four.
+  five.
 - A running job survives `docker compose restart d-migrate-mcp` —
   server-state lives in Postgres, not in-memory; verified (job created
   before a restart, `job_status_get` returns the same status afterwards).
@@ -76,28 +76,30 @@ speculatively.
    **Linux-only** — this setup does not work as-is on macOS/Windows Docker
    Desktop.
 2. Ports must be free on the host: `8787` (MCP), `5433` (Postgres, see
-   `PG_PORT`), `1433` (SQL Server, see `MSSQL_PORT`) and `3306` (MySQL,
-   see `MYSQL_PORT`) in `.env` — pick others if they collide with
-   something else you have running. SQLite has no port; it's a file
-   under `./sqlite-data`.
+   `PG_PORT`), `1433` (SQL Server, see `MSSQL_PORT`), `3306` (MySQL, see
+   `MYSQL_PORT`) and `1521` (Oracle, see `ORACLE_PORT`) in `.env` — pick
+   others if they collide with something else you have running. SQLite
+   has no port; it's a file under `./sqlite-data`.
 3. `cp .env.example .env` and set real passwords — `POSTGRES_PASSWORD`,
-   `MSSQL_SA_PASSWORD` and `MYSQL_ROOT_PASSWORD` each have to stay in
-   sync with the password embedded in the matching
+   `MSSQL_SA_PASSWORD`, `MYSQL_ROOT_PASSWORD` and `ORACLE_PASSWORD` each
+   have to stay in sync with the password embedded in the matching
    `D_MIGRATE_LOCAL_*_URL` (same file, two places each; there's no
    variable substitution across them). `MSSQL_SA_PASSWORD` must meet SQL
-   Server's complexity rule (8+ chars, 3 of 4 categories); all three DB
+   Server's complexity rule (8+ chars, 3 of 4 categories); all four DB
    passwords should avoid URL-reserved characters (`@ : / ? # %`) so they
    don't need percent-encoding in the URL. `.env` is gitignored, never
    committed.
 4. `make up` — pulls `ghcr.io/pt9912/d-migrate:1.7.1`,
-   `postgres:17.10-trixie`, `mcr.microsoft.com/mssql/server:2022-latest`
-   and `mysql:8.4`, starts all three, waits for them to be healthy, runs
-   a one-shot `mssql-init` step that creates the `dmigrate` database (SQL
-   Server's default `master` database is deliberately not used as the
-   target; MySQL creates its `dmigrate` database itself via
-   `MYSQL_DATABASE`), then starts the MCP server (registers `local_pg`,
-   `local_mssql`, `local_mysql`, `local_sqlite`, migrates the
-   `dmigrate_state` schema).
+   `postgres:17.10-trixie`, `mcr.microsoft.com/mssql/server:2022-latest`,
+   `mysql:8.4` and `gvenzl/oracle-free:23-slim-faststart`, starts them,
+   waits for them to be healthy, runs a one-shot `mssql-init` step that
+   creates the `dmigrate` database (SQL Server's default `master`
+   database is deliberately not used as the target; MySQL creates its
+   `dmigrate` database itself via `MYSQL_DATABASE`; Oracle's `dmigrate`
+   app user is created on first boot of the `oracle` service), then
+   starts the MCP server (registers `local_pg`, `local_mssql`,
+   `local_mysql`, `local_sqlite`, `local_oracle`, migrates the
+   `dmigrate_state` schema). The first Oracle boot takes a few minutes.
 5. Open this project in Claude Code. `.mcp.json` is checked in but
    **untrusted by default** — Claude Code shows the `d-migrate` server as
    "⏸ Pending approval" until you approve it once (`claude mcp list` /
@@ -105,8 +107,9 @@ speculatively.
    session started after approval.
 6. `./state` (file-backed MCP artifacts), `./sqlite-data` (the SQLite
    file, created on first use) and the Docker volumes (`pg-data`,
-   `mssql-data`, `mysql-data`) are created on first run, gitignored, and
-   local to your machine — a fresh clone starts with empty state.
+   `mssql-data`, `mysql-data`, `oracle-data`) are created on first run,
+   gitignored, and local to your machine — a fresh clone starts with
+   empty state.
 
 ## How it's wired
 
@@ -139,7 +142,7 @@ speculatively.
 ## Usage
 
 ```bash
-make up        # start (postgres, then d-migrate-mcp)
+make up        # start (test databases, then d-migrate-mcp)
 make down      # stop
 make down-v    # stop and also drop the postgres volume
 make smoke     # round-trip smoke test (see below)
@@ -170,6 +173,10 @@ from 3 to 5), review the diff deliberately and re-pin with
 make smoke                          # run, compare against expectations
 make smoke UPDATE=--update-expectations   # re-pin after reviewed changes
 ```
+
+A latency benchmark against the MCP server lives in
+`scripts/mcp-bench.sh` (`--restart` also measures cold start; useful when
+comparing the JVM and native images).
 
 ## Docs
 

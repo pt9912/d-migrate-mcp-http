@@ -16,10 +16,10 @@ Connections/State von Hand zu verdrahten.
 
 ## Was kann ich heute tun?
 
-- `make up` startet Postgres und den MCP-Server; danach läuft er unter
-  `http://127.0.0.1:8787/mcp`.
+- `make up` startet die Test-Datenbanken und den MCP-Server; danach läuft
+  er unter `http://127.0.0.1:8787/mcp`.
 - Nach einmaliger Freigabe des project-scoped `.mcp.json`-Servers in
-  Claude Code stehen 22 Tools zur Verfügung (`schema_validate`,
+  Claude Code stehen 24 Tools zur Verfügung (`schema_validate`,
   `schema_reverse_start`, `data_profile_start`, `job_status_get`, …).
 - `schema_reverse_start` gegen jede der fuenf verdrahteten Connections
   (`local_pg`, `local_mssql`, `local_mysql`, `local_sqlite`,
@@ -77,26 +77,31 @@ ausführen könnte — nicht auf Vorrat.
    kann) ist **Linux-only** — funktioniert so nicht unter macOS/Windows
    Docker Desktop.
 2. Ports müssen frei sein: `8787` (MCP), `5433` (Postgres, siehe
-   `PG_PORT`), `1433` (SQL Server, siehe `MSSQL_PORT`) und `3306` (MySQL,
-   siehe `MYSQL_PORT`) in `.env` — bei Kollision anpassen. SQLite hat
-   keinen Port, es ist eine Datei unter `./sqlite-data`.
+   `PG_PORT`), `1433` (SQL Server, siehe `MSSQL_PORT`), `3306` (MySQL,
+   siehe `MYSQL_PORT`) und `1521` (Oracle, siehe `ORACLE_PORT`) in
+   `.env` — bei Kollision anpassen. SQLite hat keinen Port, es ist eine
+   Datei unter `./sqlite-data`.
 3. `cp .env.example .env` und echte Passwörter setzen — `POSTGRES_PASSWORD`,
-   `MSSQL_SA_PASSWORD` und `MYSQL_ROOT_PASSWORD` müssen jeweils synchron
-   zum Passwort in der passenden `D_MIGRATE_LOCAL_*_URL` bleiben (gleiche
-   Datei, je zwei Stellen, keine Variablen-Interpolation dazwischen).
+   `MSSQL_SA_PASSWORD`, `MYSQL_ROOT_PASSWORD` und `ORACLE_PASSWORD`
+   müssen jeweils synchron zum Passwort in der passenden
+   `D_MIGRATE_LOCAL_*_URL` bleiben (gleiche Datei, je zwei Stellen, keine
+   Variablen-Interpolation dazwischen).
    `MSSQL_SA_PASSWORD` muss die SQL-Server-Komplexitätsregel erfüllen
-   (mind. 8 Zeichen, 3 von 4 Kategorien); alle drei DB-Passwörter sollten
+   (mind. 8 Zeichen, 3 von 4 Kategorien); alle vier DB-Passwörter sollten
    URL-reservierte Zeichen (`@ : / ? # %`) vermeiden, damit sie in der URL
    nicht percent-encoded werden müssen. `.env` ist gitignored, wird nie
    committet.
 4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.7.1`,
-   `postgres:17.10-trixie`, `mcr.microsoft.com/mssql/server:2022-latest`
-   und `mysql:8.4`, startet alle drei, wartet auf „healthy“, führt
-   einmalig `mssql-init` aus (legt die Datenbank `dmigrate` an — SQL
-   Servers Default-Datenbank `master` wird bewusst nicht als Ziel genutzt;
-   MySQL legt seine `dmigrate`-Datenbank selbst per `MYSQL_DATABASE` an),
-   dann den MCP-Server (registriert `local_pg`, `local_mssql`,
-   `local_mysql`, `local_sqlite`, migriert das `dmigrate_state`-Schema).
+   `postgres:17.10-trixie`, `mcr.microsoft.com/mssql/server:2022-latest`,
+   `mysql:8.4` und `gvenzl/oracle-free:23-slim-faststart`, startet sie,
+   wartet auf „healthy“, führt einmalig `mssql-init` aus (legt die
+   Datenbank `dmigrate` an — SQL Servers Default-Datenbank `master` wird
+   bewusst nicht als Ziel genutzt; MySQL legt seine `dmigrate`-Datenbank
+   selbst per `MYSQL_DATABASE` an; der Oracle-App-User `dmigrate` entsteht
+   beim ersten Start des `oracle`-Service), dann den MCP-Server
+   (registriert `local_pg`, `local_mssql`, `local_mysql`, `local_sqlite`,
+   `local_oracle`, migriert das `dmigrate_state`-Schema). Der erste
+   Oracle-Start braucht einige Minuten.
 5. Projekt in Claude Code öffnen. `.mcp.json` ist eingecheckt, aber
    **standardmäßig nicht vertraut** — Claude Code zeigt `d-migrate` als
    „⏸ Pending approval“, bis einmal bestätigt wird (`claude mcp list` /
@@ -104,9 +109,9 @@ ausführen könnte — nicht auf Vorrat.
    gestarteten Session.
 6. `./state` (dateibasierte MCP-Artefakte), `./sqlite-data` (die
    SQLite-Datei, wird bei Bedarf angelegt) und die Docker-Volumes
-   (`pg-data`, `mssql-data`, `mysql-data`) entstehen beim ersten Start,
-   sind gitignored und lokal — ein frischer Clone startet mit leerem
-   State.
+   (`pg-data`, `mssql-data`, `mysql-data`, `oracle-data`) entstehen beim
+   ersten Start, sind gitignored und lokal — ein frischer Clone startet
+   mit leerem State.
 
 ## How it's wired
 
@@ -140,9 +145,10 @@ ausführen könnte — nicht auf Vorrat.
 ## Usage
 
 ```bash
-make up        # start (postgres, then d-migrate-mcp)
+make up        # start (test databases, then d-migrate-mcp)
 make down      # stop
 make down-v    # stop and also drop the postgres volume
+make smoke     # round-trip smoke test (see below)
 make logs      # tail logs
 make restart   # restart d-migrate-mcp — pick up .d-migrate.yaml / policy-rules.yaml edits
 ```
@@ -172,7 +178,9 @@ make smoke                                  # Lauf gegen Erwartungen
 make smoke UPDATE=--update-expectations     # nach gepruefter Aenderung neu pinnen
 ```
 
-## Docs
+Ein Latenz-Benchmark gegen den MCP-Server liegt in
+`scripts/mcp-bench.sh` (`--restart` misst zusaetzlich den Kaltstart;
+nuetzlich zum Vergleichen von JVM- und Native-Image).
 
 ## Docs
 
