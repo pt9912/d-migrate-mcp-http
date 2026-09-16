@@ -162,28 +162,36 @@ docker run --rm -i --user "$(id -u):$(id -g)" \
 if [ "$SQLITE_APPLY_RC" != 0 ] || grep -qiE '^Error|error:|Parse error|no such|Runtime error' "$TMP/sqlite_apply.log"; then
   sed -n '1,10p' "$TMP/sqlite_apply.log" >&2
   fail "sqlite: DDL-Fehler (Log: $TMP/sqlite_apply.log)"
+else
+  echo "   sqlite: OK"
 fi
-echo "   sqlite: OK"
 # MySQL: Datenbank neu anlegen
 docker exec d-migrate-mysql sh -c \
   'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS dmigrate; CREATE DATABASE dmigrate;"' 2>/dev/null
-if ! docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' \
-     > "$TMP/mysql_apply.log" 2>&1 < "$TMP/ddl_MYSQL.sql"; then
+MYSQL_APPLY_RC=0
+docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' \
+  > "$TMP/mysql_apply.log" 2>&1 < "$TMP/ddl_MYSQL.sql" || MYSQL_APPLY_RC=$?
+if [ "$MYSQL_APPLY_RC" != 0 ] || grep -qiE '^ERROR|ERROR [0-9]+' "$TMP/mysql_apply.log"; then
   sed -n '1,5p' "$TMP/mysql_apply.log" >&2
   fail "mysql: DDL-Fehler (Log: $TMP/mysql_apply.log)"
+else
+  echo "   mysql: OK"
 fi
-grep -qiE '^ERROR|ERROR [0-9]+' "$TMP/mysql_apply.log" && fail "mysql: DDL-Fehler (Log: $TMP/mysql_apply.log)"
-echo "   mysql: OK"
 # MSSQL: Tabellen/View droppen, dann apply
 docker exec d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
   -P "$MSSQL_SA_PASSWORD" -d dmigrate -Q \
   "IF OBJECT_ID('order_summary','V') IS NOT NULL DROP VIEW order_summary; DROP TABLE IF EXISTS order_items, orders, products, customers, type_probe, type_matrix;" \
   > /dev/null
-docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
+MSSQL_APPLY_RC=0
+docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -b -C -S localhost -U sa \
   -P "$MSSQL_SA_PASSWORD" -d dmigrate \
-  < "$TMP/ddl_MSSQL.sql" > "$TMP/mssql_apply.log"
-if grep -qE 'Msg [0-9]+, Level 1[5-9]' "$TMP/mssql_apply.log"; then fail "mssql: DDL-Fehler (Log: $TMP/mssql_apply.log)"; fi
-echo "   mssql: OK"
+  < "$TMP/ddl_MSSQL.sql" > "$TMP/mssql_apply.log" 2>&1 || MSSQL_APPLY_RC=$?
+if [ "$MSSQL_APPLY_RC" != 0 ] || grep -qiE 'Msg [0-9]+, Level|^Sqlcmd: Error|Login failed|Cannot open database' "$TMP/mssql_apply.log"; then
+  sed -n '1,5p' "$TMP/mssql_apply.log" >&2
+  fail "mssql: DDL-Fehler (Log: $TMP/mssql_apply.log)"
+else
+  echo "   mssql: OK"
+fi
 # Oracle: Tabellen/View droppen, dann apply (generierte DDL endet auf ';;').
 # Achtung: die generierte DDL quotet alle Identifier, d.h. die Objekte heissen
 # in user_objects kleingeschrieben ('customers') — deshalb UPPER()-Vergleich.
@@ -192,13 +200,18 @@ docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost
 BEGIN FOR o IN (SELECT object_name, object_type FROM user_objects WHERE UPPER(object_name) IN ('ORDER_SUMMARY','ORDER_ITEMS','ORDERS','PRODUCTS','CUSTOMERS','TYPE_PROBE','TYPE_MATRIX') ORDER BY DECODE(object_type,'VIEW',1,2)) LOOP EXECUTE IMMEDIATE 'DROP ' || o.object_type || ' "' || o.object_name || '"'; END LOOP; END;
 /
 EOF
-sed 's/;;/;/g' "$TMP/ddl_ORACLE.sql" > "$TMP/ddl_ORACLE_norm.sql"
+{ echo "WHENEVER SQLERROR EXIT FAILURE"; sed 's/;;/;/g' "$TMP/ddl_ORACLE.sql"; } > "$TMP/ddl_ORACLE_norm.sql"
 docker cp "$TMP/ddl_ORACLE_norm.sql" d-migrate-oracle:/tmp/smoke_ddl.sql >/dev/null
+ORACLE_APPLY_RC=0
 docker exec d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
-  @/tmp/smoke_ddl.sql > "$TMP/oracle_apply.log"
+  @/tmp/smoke_ddl.sql > "$TMP/oracle_apply.log" 2>&1 || ORACLE_APPLY_RC=$?
 # nur Zeilenanfang-Fehler zaehlen: die DDL-Kommentare enthalten "ORA-02329" etc.
-if grep -qE '^(ORA-|SP2-|ERROR at)' "$TMP/oracle_apply.log"; then fail "oracle: DDL-Fehler (Log: $TMP/oracle_apply.log)"; fi
-echo "   oracle: OK"
+if [ "$ORACLE_APPLY_RC" != 0 ] || grep -qE '^(ORA-|SP2-|ERROR at)' "$TMP/oracle_apply.log"; then
+  sed -n '1,5p' "$TMP/oracle_apply.log" >&2
+  fail "oracle: DDL-Fehler (Log: $TMP/oracle_apply.log)"
+else
+  echo "   oracle: OK"
+fi
 
 # ------------------------------------------ 6. Reverse der 4 Ziele
 echo "== 6. schema_reverse der 4 angewendeten Ziele"
