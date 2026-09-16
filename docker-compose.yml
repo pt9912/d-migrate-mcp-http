@@ -97,7 +97,7 @@ services:
       start_period: 300s
 
   d-migrate-mcp:
-    image: ghcr.io/pt9912/d-migrate:1.7.0
+    image: ghcr.io/pt9912/d-migrate:1.7.1
     container_name: d-migrate-mcp
     depends_on:
       postgres:

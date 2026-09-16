@@ -89,7 +89,7 @@ speculatively.
    passwords should avoid URL-reserved characters (`@ : / ? # %`) so they
    don't need percent-encoding in the URL. `.env` is gitignored, never
    committed.
-4. `make up` — pulls `ghcr.io/pt9912/d-migrate:1.7.0`,
+4. `make up` — pulls `ghcr.io/pt9912/d-migrate:1.7.1`,
    `postgres:17.10-trixie`, `mcr.microsoft.com/mssql/server:2022-latest`
    and `mysql:8.4`, starts all three, waits for them to be healthy, runs
    a one-shot `mssql-init` step that creates the `dmigrate` database (SQL
@@ -179,7 +179,7 @@ make smoke UPDATE=--update-expectations   # re-pin after reviewed changes
 
 ## Upgrading
 
-Bump the image tag in `docker-compose.yml` (pinned to `1.7.0`), then
+Bump the image tag in `docker-compose.yml` (pinned to `1.7.1`), then
 `make up`.
 
 For production/multi-host use, switch `--auth-mode` to `jwt-jwks` (see
