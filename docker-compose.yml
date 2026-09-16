@@ -85,11 +85,14 @@ services:
       start_period: 20s
 
   # Lokales Oracle (FREEPDB1) für Cross-Dialect-Round-Trips PG <-> Oracle.
-  # gvenzl/oracle-free: APP_USER wird beim ersten Start in FREEPDB1 angelegt
-  # (inkl. Tablespace-Quota). Das faststart-Varianten-Image bootet nach dem
-  # ersten Start in ~1-2 Min. Der eingebaute HEALTHCHECK des Images gilt.
+  # gvenzl/oracle-free, Flavor "regular + faststart": das -slim-Flavor
+  # entfernt Oracle Spatial und Locator ("uninstalled and removed",
+  # $ORACLE_HOME/md) — damit fehlt MDSYS.SDO_GEOMETRY und jede Probe mit
+  # SDO_GEOMETRY scheitert mit ORA-00902. APP_USER wird beim ersten Start in
+  # FREEPDB1 angelegt (inkl. Tablespace-Quota). Der eingebaute HEALTHCHECK
+  # des Images gilt; faststart bootet nach dem ersten Start in ~1-2 Min.
   oracle:
-    image: gvenzl/oracle-free:23-slim-faststart
+    image: gvenzl/oracle-free:23-faststart
     container_name: d-migrate-oracle
     restart: unless-stopped
     environment:

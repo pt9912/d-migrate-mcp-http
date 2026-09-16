@@ -92,7 +92,7 @@ speculatively.
 4. `make up` — pulls `ghcr.io/pt9912/d-migrate:1.7.1`,
    `postgis/postgis:18-3.6` (PostgreSQL 18 + PostGIS 3.6, digest-pinned),
    `mcr.microsoft.com/mssql/server:2022-latest`,
-   `mysql:8.4` and `gvenzl/oracle-free:23-slim-faststart`, starts them,
+   `mysql:8.4` and `gvenzl/oracle-free:23-faststart`, starts them,
    waits for them to be healthy, runs a one-shot `mssql-init` step that
    creates the `dmigrate` database (SQL Server's default `master`
    database is deliberately not used as the target; MySQL creates its
@@ -127,7 +127,7 @@ speculatively.
   `dmigrate`) as `local_mysql`; a SQLite file at `./sqlite-data/local.db`
   (created on demand, `?spatialite=true` loads `mod_spatialite`, already
   bundled in the d-migrate runtime image) as `local_sqlite`; local Oracle
-  (`gvenzl/oracle-free:23-slim-faststart`, `127.0.0.1:${ORACLE_PORT:-1521}`,
+  (`gvenzl/oracle-free:23-faststart`, `127.0.0.1:${ORACLE_PORT:-1521}`,
   FREEPDB1, app user `dmigrate`) as `local_oracle` (first boot creates the
   user and takes a few minutes; readiness is polled via the image's
   `healthcheck.sh`).

@@ -94,7 +94,7 @@ ausführen könnte — nicht auf Vorrat.
 4. `make up` — zieht `ghcr.io/pt9912/d-migrate:1.7.1`,
    `postgis/postgis:18-3.6` (PostgreSQL 18 + PostGIS 3.6, digest-gepinnt),
    `mcr.microsoft.com/mssql/server:2022-latest`,
-   `mysql:8.4` und `gvenzl/oracle-free:23-slim-faststart`, startet sie,
+   `mysql:8.4` und `gvenzl/oracle-free:23-faststart`, startet sie,
    wartet auf „healthy“, führt einmalig `mssql-init` aus (legt die
    Datenbank `dmigrate` an — SQL Servers Default-Datenbank `master` wird
    bewusst nicht als Ziel genutzt; MySQL legt seine `dmigrate`-Datenbank
@@ -130,7 +130,7 @@ ausführen könnte — nicht auf Vorrat.
   bei Bedarf angelegt, `?spatialite=true` lädt das im
   d-migrate-Runtime-Image bereits enthaltene `mod_spatialite`) als
   `local_sqlite`; lokales Oracle
-  (`gvenzl/oracle-free:23-slim-faststart`, `127.0.0.1:${ORACLE_PORT:-1521}`,
+  (`gvenzl/oracle-free:23-faststart`, `127.0.0.1:${ORACLE_PORT:-1521}`,
   FREEPDB1, App-User `dmigrate`) als `local_oracle` (der erste Start legt
   den User an und braucht einige Minuten; Bereitschaft wird ueber das
   `healthcheck.sh` des Images gepollt).
