@@ -21,9 +21,10 @@ logs:
 restart:
 	$(DOCKER_COMPOSE) restart d-migrate-mcp
 
-# Werkzeug-Image fuer die Test-Skripte (sqlite3 + mod_spatialite + python3);
-# Smoke und Typ-Matrix bauen es bei Bedarf selbst, dieses Target ist fuer den
-# expliziten Build.
+# Werkzeug-Images fuer die Test-Skripte: Default-Stage = sqlite3 +
+# mod_spatialite (SQLite-/SpatiaLite-Legs), `--target py` = python3
+# (Typcheck der Matrix). Smoke und Typ-Matrix bauen sie bei Bedarf selbst;
+# dieses Target ist fuer den expliziten Build.
 harness-tools:
 	docker build -t $(HARNESS_TOOL_IMAGE) tools/harness-tools
 	docker build --target py -t $(HARNESS_PYTHON_IMAGE) tools/harness-tools

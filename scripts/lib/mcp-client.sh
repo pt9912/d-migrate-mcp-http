@@ -1,7 +1,7 @@
 # Gemeinsamer MCP-HTTP-Client (JSON-RPC ueber /mcp) fuer die Skripte in
-# scripts/. Wird von type-matrix.sh benutzt; roundtrip-smoke.sh traegt noch
-# eine eigene Kopie (bewusst nicht angefasst, um den laufenden Smoke nicht
-# umzubauen).
+# scripts/. Wird von type-matrix.sh UND roundtrip-smoke.sh benutzt (die
+# frueheren Kopien waren auseinandergelaufen: 90 vs. 60 Polls, pageSize
+# 60 vs. Default).
 #
 # Erwartet vom Aufrufer: MCP_URL, PROTOCOL, jq/curl vorhanden, eine
 # fail()-Funktion. Setzt SESSION.
@@ -65,6 +65,7 @@ reverse_conn() {
   job=$(mcp_call schema_reverse_start "$args" | jq -r '.jobId')
   res=$(await_job "$job") || return 1
   art=$(echo "$res" | jq -r '.artifacts[0]' | sed 's|.*/artifacts/||')
-  mcp_call schema_list '{"pageSize":60}' | jq -r --arg a "$art" \
-    '.schemas[] | select(.artifactRef==$a) | .schemaId'
+  mcp_call schema_list '{"pageSize":60}' | jq -er --arg a "$art" \
+    '.schemas[] | select(.artifactRef==$a) | .schemaId' \
+    || { fail "kein schemaId zu Artefakt $art gefunden"; return 1; }
 }

@@ -44,15 +44,21 @@ def parse_model(path: str):
     """Liefert (columns, custom_types) aus dem Artefakt.
 
     columns: {spalte: {'type': ..., 'ref_type': ...}} der Tabelle type_matrix
+
+    Die Einrueckung wird relativ bestimmt (kein YAML-Parser verfuegbar), und
+    zwar so, dass Unterbloecke NICHT als Spalten oder Attribute durchschlagen:
+    eine Spalte endet, sobald ein Schluessel wieder auf Spalten- oder
+    Blockebene steht; `generation:`/`constraints:`-Eintraege (die selbst ein
+    `type:` tragen) duerfen den Spaltentyp nicht ueberschreiben.
     """
-    section = None
-    section_indent = None
-    table = None
-    table_indent = None
+    section = section_indent = None
+    table = table_indent = None
     in_columns = False
-    columns_indent = None
+    columns_indent = column_indent = None
     col = None
+    in_subblock = False
     columns, custom_types = {}, set()
+    ct_indent = None
 
     for raw in open(path):
         line = raw.rstrip('\n')
@@ -60,37 +66,49 @@ def parse_model(path: str):
         a = ATTR_RE.match(line)
         if m:
             indent, name = len(m.group(1)), m.group(2)
-            if section is None or (section_indent is not None and indent <= section_indent):
-                # neue Top-Level-Sektion
+            if section is None or indent <= (section_indent if section_indent is not None else -1):
                 section, section_indent = name, indent
                 table = table_indent = None
-                in_columns, columns_indent, col = False, None, None
+                in_columns, columns_indent, column_indent, col, in_subblock = False, None, None, None, False
                 continue
             if section == 'custom_types':
-                custom_types.add(name.lower())
+                # nur Typnamen auf der ersten Ebene der Sektion ('values'
+                # darunter ist eine Eigenschaft, kein Typ)
+                if ct_indent is None or indent < ct_indent:
+                    ct_indent = indent
+                if indent == ct_indent:
+                    custom_types.add(name.lower())
                 continue
-            if section == 'tables':
-                if table_indent is None:
-                    table_indent = indent
-                if indent == table_indent:
-                    table = name
-                    in_columns, columns_indent, col = False, None, None
-                    continue
-                if table == 'type_matrix':
-                    if name == 'columns':
-                        in_columns, columns_indent = True, indent
-                        continue
-                    if in_columns and (columns_indent is None or indent > columns_indent):
-                        col = name.lower()
-                        columns.setdefault(col, {})
-                        continue
-            if section == 'tables' and table == 'type_matrix' and in_columns and indent > (columns_indent or 0):
-                # verschachtelter Block einer Spalte (z. B. generation:) — ignorieren
+            if section != 'tables':
                 continue
+            if table_indent is None:
+                table_indent = indent
+            if indent == table_indent:
+                table = name
+                in_columns, columns_indent, column_indent, col, in_subblock = False, None, None, None, False
+                continue
+            if table != 'type_matrix':
+                continue
+            if not in_columns:
+                if name == 'columns':
+                    in_columns, columns_indent, column_indent = True, indent, None
+                continue
+            if indent <= columns_indent:      # Spaltenblock verlassen (constraints:, primary_key:, indices:)
+                in_columns, col, in_subblock = False, None, False
+                continue
+            if column_indent is None or indent < column_indent:
+                column_indent = indent        # die erste Spalte setzt die Einrueckung
+            if indent == column_indent:
+                col = name.lower()
+                columns.setdefault(col, {})
+                in_subblock = False
+                continue
+            in_subblock = True                # Unterblock der Spalte (z. B. generation:)
             continue
-        if a and section == 'tables' and table == 'type_matrix' and col:
+        if a and section == 'tables' and table == 'type_matrix' and in_columns and col:
             indent, key, val = len(a.group(1)), a.group(2), a.group(3)
-            if columns_indent is not None and indent > columns_indent:
+            # nur direkte Attribute der Spalte; `type:` in Unterbloecken ignoriert
+            if not in_subblock and indent == (column_indent or 0) + 2:
                 columns[col][key] = val.strip().lower()
     return columns, custom_types
 

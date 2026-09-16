@@ -71,15 +71,26 @@ seed_pg() {
   docker exec -i d-migrate-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -q < scripts/types/pg.sql
 }
 seed_mssql() {
-  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
-    -P "$MSSQL_SA_PASSWORD" -d dmigrate -i /dev/stdin < scripts/types/mssql.sql >/dev/null
+  # -b: sonst Exit 0 trotz SQL-Fehler; Log wird geprueft statt verworfen
+  docker exec -i d-migrate-mssql /opt/mssql-tools18/bin/sqlcmd -b -C -S localhost -U sa \
+    -P "$MSSQL_SA_PASSWORD" -d dmigrate -i /dev/stdin < scripts/types/mssql.sql > "$TMP/seed_mssql.log" 2>&1 || return 1
+  ! grep -qiE 'Msg [0-9]+, Level|^Sqlcmd: Error|Login failed|Cannot open database' "$TMP/seed_mssql.log"
 }
 seed_mysql() {
-  docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' 2>/dev/null < scripts/types/mysql.sql
+  if ! docker exec -i d-migrate-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" dmigrate' \
+       > "$TMP/seed_mysql.log" 2>&1 < scripts/types/mysql.sql; then
+    return 1
+  fi
+  ! grep -qiE '^ERROR|ERROR [0-9]+' "$TMP/seed_mysql.log"
 }
 seed_oracle() {
-  docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
-    < <(sed 's/;;/;/g' scripts/types/oracle.sql) >/dev/null
+  # WHENEVER SQLERROR EXIT FAILURE: sqlplus endet sonst mit 0 trotz ORA-Fehler
+  if ! docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
+       < <(sed 's/;;/;/g' scripts/types/oracle.sql; echo "WHENEVER SQLERROR EXIT FAILURE") \
+       > "$TMP/seed_oracle.log" 2>&1; then
+    return 1
+  fi
+  ! grep -qE '^(ORA-|SP2-|ERROR at)' "$TMP/seed_oracle.log"
   # Metadaten fuer einen spaeteren Spatial-Index sind hier nicht noetig; nur aufraeumen:
   docker exec -i d-migrate-oracle sqlplus -S dmigrate/"$ORACLE_PASSWORD"@localhost:1521/FREEPDB1 \
     <<'SQL' >/dev/null
