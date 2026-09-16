@@ -119,4 +119,9 @@ fi
 echo "== Ergebnis (ms): median mean min max n"
 printf '  capabilities_list : '; stats < "$TMP/fast.txt"
 [ -f "$TMP/store.txt" ] && { printf '  schema_list       : '; stats < "$TMP/store.txt"; }
-[ -f "$TMP/gen.txt" ] && { printf '  schema_generate   : '; stats < "$TMP/gen.txt"; }
+if [ -f "$TMP/gen.txt" ]; then printf '  schema_generate   : '; stats < "$TMP/gen.txt"; fi
+
+# Explizit 0: die Ausgabe oben endet sonst auf einem Test (`[ -f ... ]`), dessen
+# Status der Shell als Exit-Code des Skripts gilt — ein erfolgreicher Lauf mit
+# uebersprungener Sektion meldete dann Fehlschlag.
+exit 0
